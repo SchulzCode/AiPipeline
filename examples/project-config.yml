@@ -1,0 +1,19 @@
+main_branch: main
+agent: codex
+
+git:
+  auto_merge: true
+  merge_method: squash
+
+setup:
+  auto: true
+  commands: {}
+
+quality:
+  commands:
+    test: python -m pytest
+    lint: ruff check .
+
+security:
+  commands:
+    dependency-audit: pip-audit

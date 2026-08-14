@@ -1,0 +1,39 @@
+export type User = { id: string; login: string; avatar_url?: string | null };
+export type Project = {
+  id: string;
+  name: string;
+  repository_full_name?: string | null;
+  repository_url?: string | null;
+  local_path?: string | null;
+  installation_id?: number | null;
+  default_branch: string;
+  agent: "codex" | "claude" | string;
+  enabled: boolean;
+  status: string;
+  created_at: string;
+};
+export type Task = {
+  id: string;
+  project_id: string;
+  source: string;
+  source_reference?: string | null;
+  title?: string | null;
+  prompt: string;
+  status: string;
+  risk?: string | null;
+  context_class?: string | null;
+  core_task_id?: string | null;
+  branch?: string | null;
+  pr_number?: number | null;
+  error?: string | null;
+  input_tokens: number;
+  output_tokens: number;
+  created_at: string;
+  started_at?: string | null;
+  completed_at?: string | null;
+};
+export type Event = { id: number; task_id: string; kind: string; detail?: string | null; created_at: string };
+export type Issue = { number: number; title: string; state: string; url: string; labels: string[] };
+
+export type Installation = { id: number; account: string; target_type?: string | null };
+export type Repository = { id: number; name: string; full_name: string; private: boolean; default_branch: string };

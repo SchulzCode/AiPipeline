@@ -1,0 +1,94 @@
+services:
+  postgres:
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_DB: aipipe
+      POSTGRES_USER: aipipe
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U aipipe -d aipipe"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+    restart: unless-stopped
+
+  api:
+    build:
+      context: .
+      dockerfile: docker/api.Dockerfile
+    environment: &control-env
+      DATABASE_URL: postgresql+psycopg://aipipe:${POSTGRES_PASSWORD:-change-me}@postgres:5432/aipipe
+      AIPIPE_API_BASE_URL: ${AIPIPE_API_BASE_URL:-http://localhost:8000}
+      AIPIPE_WEB_BASE_URL: ${AIPIPE_WEB_BASE_URL:-http://localhost:3000}
+      AIPIPE_CORS_ORIGINS: ${AIPIPE_CORS_ORIGINS:-http://localhost:3000}
+      AIPIPE_SESSION_SECRET: ${AIPIPE_SESSION_SECRET:-development-only-change-me}
+      AIPIPE_DEV_AUTH: ${AIPIPE_DEV_AUTH:-false}
+      AIPIPE_ALLOWED_GITHUB_LOGINS: ${AIPIPE_ALLOWED_GITHUB_LOGINS:-}
+      AIPIPE_REPOS_ROOT: /data/repos
+      AIPIPE_WORKER_STALE_SECONDS: ${AIPIPE_WORKER_STALE_SECONDS:-300}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_CLIENT_SECRET: ${GITHUB_APP_CLIENT_SECRET:-}
+      GITHUB_APP_PRIVATE_KEY_B64: ${GITHUB_APP_PRIVATE_KEY_B64:-}
+      GITHUB_WEBHOOK_SECRET: ${GITHUB_WEBHOOK_SECRET:-}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "8000:8000"
+    volumes:
+      - aipipe-data:/data
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  worker:
+    build:
+      context: .
+      dockerfile: docker/worker.Dockerfile
+      args:
+        CODEX_VERSION: ${CODEX_VERSION:-0.147.0}
+        CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.232}
+    environment:
+      DATABASE_URL: postgresql+psycopg://aipipe:${POSTGRES_PASSWORD:-change-me}@postgres:5432/aipipe
+      AIPIPE_REPOS_ROOT: /data/repos
+      AIPIPE_WORKER_STALE_SECONDS: ${AIPIPE_WORKER_STALE_SECONDS:-300}
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_CLIENT_ID: ${GITHUB_APP_CLIENT_ID:-}
+      GITHUB_APP_PRIVATE_KEY_B64: ${GITHUB_APP_PRIVATE_KEY_B64:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      HOME: /tmp/aipipe-home
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - aipipe-data:/data
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=1g
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  web:
+    build:
+      context: .
+      dockerfile: docker/web.Dockerfile
+      args:
+        NEXT_PUBLIC_API_URL: ${NEXT_PUBLIC_API_URL:-http://localhost:8000}
+    depends_on:
+      - api
+    ports:
+      - "3000:3000"
+    restart: unless-stopped
+
+volumes:
+  postgres-data:
+  aipipe-data:

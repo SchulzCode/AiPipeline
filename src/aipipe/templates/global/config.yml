@@ -1,0 +1,25 @@
+# Global defaults. Project .ai/config.yml overrides these values.
+agent: codex
+main_branch: main
+command_timeout_seconds: 1200
+ci_timeout_seconds: 1800
+
+retries:
+  implementation: 3
+  verification: 3
+  review: 2
+  ci: 2
+
+git:
+  auto_merge: true
+  merge_method: squash
+
+# Leave models unset to use the selected CLI's configured/default model.
+codex:
+  binary: codex
+  ignore_user_config: true
+  network_access: false
+
+claude:
+  binary: claude
+  permission_mode: auto
