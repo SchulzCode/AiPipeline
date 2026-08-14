@@ -104,3 +104,62 @@ class IssueOut(BaseModel):
     state: str
     url: str
     labels: list[str] = []
+
+
+class ActivityItemOut(BaseModel):
+    category: str
+    title: str
+    summary: str
+    result: str | None = None
+    next_step: str | None = None
+    status: str
+    timestamp: datetime
+    duration_seconds: float | None = None
+    technical_event_id: int | None = None
+
+
+class CurrentActivityOut(BaseModel):
+    title: str
+    summary: str
+    phase: str
+    started_at: datetime
+    next_step: str | None = None
+    agent_label: str
+
+
+class BlockerOut(BaseModel):
+    reason: str
+    last_phase: str | None = None
+
+
+class CheckStatusOut(BaseModel):
+    type: str
+    name: str
+    status: str
+    updated_at: datetime
+
+
+class ReviewSummaryOut(BaseModel):
+    status: str
+    result: str
+    updated_at: datetime
+
+
+class CiSummaryOut(BaseModel):
+    total: int
+    passed: int
+    failed: int
+
+
+class ChecksSummaryOut(BaseModel):
+    checks: list[CheckStatusOut] = []
+    review: ReviewSummaryOut | None = None
+    security_review: ReviewSummaryOut | None = None
+    ci: CiSummaryOut | None = None
+
+
+class ActivityFeedOut(BaseModel):
+    items: list[ActivityItemOut]
+    current: CurrentActivityOut | None = None
+    blocker: BlockerOut | None = None
+    checks: ChecksSummaryOut
