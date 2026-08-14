@@ -27,34 +27,16 @@ class PipelineBlocked(RuntimeError):
 
 
 class Orchestrator:
-    def __init__(
-        self,
-        repo: Path,
-        agent_override: str | None = None,
-        state_observer: Callable[[str, dict], None] | None = None,
-        github_env_provider: Callable[[], dict[str, str]] | None = None,
-    ):
+    def __init__(self, repo: Path, agent_override: str | None = None, state_observer: Callable[[str, dict], None] | None = None, github_env_provider: Callable[[], dict[str, str]] | None = None):
         self.repo = repo.resolve()
         self.home = home_dir()
         self.home.mkdir(parents=True, exist_ok=True)
         self.config = load_config(self.repo)
         if agent_override:
             self.config.agent = agent_override
-        self.state = StateStore(
-            self.home / "state" / "pipeline.db", observer=state_observer
-        )
-        self.git = GitManager(
-            self.repo,
-            self.config.main_branch,
-            self.home / "worktrees",
-            self.config.command_timeout_seconds,
-            env_provider=github_env_provider,
-        )
-        self.github = GitHubAdapter(
-            self.repo,
-            self.config.command_timeout_seconds,
-            env_provider=github_env_provider,
-        )
+        self.state = StateStore(self.home / "state" / "pipeline.db", observer=state_observer)
+        self.git = GitManager(self.repo, self.config.main_branch, self.home / "worktrees", self.config.command_timeout_seconds, env_provider=github_env_provider)
+        self.github = GitHubAdapter(self.repo, self.config.command_timeout_seconds, env_provider=github_env_provider)
         self.context = ContextBuilder(self.home / "global")
         self.agent = build_agent(self.config.agent, self.config)
 
@@ -62,9 +44,7 @@ class Orchestrator:
         return self.state.project_id(self.repo, self.git.remote_url())
 
     def enqueue_prompt_task(self, prompt: str) -> str:
-        task = self.state.create_task(
-            self._project(), "prompt", prompt, title=prompt[:120]
-        )
+        task = self.state.create_task(self._project(), "prompt", prompt, title=prompt[:120])
         return task["public_id"]
 
     def create_prompt_task(self, prompt: str) -> str:
@@ -75,23 +55,12 @@ class Orchestrator:
     def enqueue_issue_task(self, issue_number: int) -> tuple[str, list[str]]:
         issue = self.github.issue(issue_number)
         labels = [x.get("name", "") for x in issue.get("labels", [])]
-        comments = truncate(
-            "\n".join(
-                c.get("body", "") for c in issue.get("comments", [])[-8:]
-            ),
-            8000,
-        )
+        comments = truncate("\n".join(c.get("body", "") for c in issue.get("comments", [])[-8:]), 8000)
         issue_body = truncate(issue.get("body") or "", 12000)
-        body = issue_body + (
-            "\n\nRecent comments:\n" + comments if comments else ""
-        )
+        body = issue_body + ("\n\nRecent comments:\n" + comments if comments else "")
         goal = truncate(f"{issue['title']}\n\n{body}".strip(), 22000)
         task = self.state.create_task(
-            self._project(),
-            "github_issue",
-            goal,
-            title=issue["title"],
-            body=body,
+            self._project(), "github_issue", goal, title=issue["title"], body=body,
             source_reference=str(issue_number),
         )
         task["_labels"] = labels
@@ -107,18 +76,8 @@ class Orchestrator:
         for name, r in results:
             status = "PASS" if r.ok else "FAIL"
             all_ok &= r.ok
-            summary = truncate(
-                (r.stdout or "") + "\n" + (r.stderr or ""), 9000
-            )
-            self.state.check(
-                task_db_id,
-                kind,
-                name,
-                status,
-                str(r.command),
-                r.returncode,
-                summary,
-            )
+            summary = truncate((r.stdout or "") + "\n" + (r.stderr or ""), 9000)
+            self.state.check(task_db_id, kind, name, status, str(r.command), r.returncode, summary)
         return all_ok
 
     @staticmethod
@@ -156,157 +115,72 @@ class Orchestrator:
             )
 
             self.state.set_status(public_id, TaskStatus.PREPARING)
-            branch, worktree = self.git.prepare(
-                public_id, task_row.get("title") or task_row["goal"]
-            )
-            init_project_knowledge(
-                worktree,
-                main_branch=self.config.main_branch,
-                agent=self.config.agent,
-                auto_merge=self.config.auto_merge,
-                merge_method=self.config.merge_method,
-            )
-            self.state.update_task(
-                public_id, branch=branch, worktree=str(worktree)
-            )
+            branch, worktree = self.git.prepare(public_id, task_row.get("title") or task_row["goal"])
+            init_project_knowledge(worktree, main_branch=self.config.main_branch, agent=self.config.agent, auto_merge=self.config.auto_merge, merge_method=self.config.merge_method)
+            self.state.update_task(public_id, branch=branch, worktree=str(worktree))
 
             runtime_root = self.home / "runtime" / public_id
             status_before_setup = self.git.status(worktree)
-            setup = SetupEngine(
-                self.config.setup_commands,
-                self.config.setup_auto,
-                self.config.command_timeout_seconds,
-                runtime_root,
-            )
+            setup = SetupEngine(self.config.setup_commands, self.config.setup_auto, self.config.command_timeout_seconds, runtime_root)
             setup_outcome = setup.execute(worktree)
             if setup_outcome.results:
-                setup_ok = self._record_checks(
-                    task_db_id, "setup", setup_outcome.results
-                )
+                setup_ok = self._record_checks(task_db_id, "setup", setup_outcome.results)
                 if not setup_ok:
-                    raise PipelineBlocked(
-                        "Project dependency/setup step failed. Configure .ai/config.yml setup.commands if autodetection is insufficient."
-                    )
+                    raise PipelineBlocked("Project dependency/setup step failed. Configure .ai/config.yml setup.commands if autodetection is insufficient.")
             if self.git.status(worktree) != status_before_setup:
                 # Setup may generate ignored dependency/cache directories, but it may not
                 # mutate tracked/unignored project state before the agent begins.
-                raise PipelineBlocked(
-                    "Project setup changed Git-visible files. Fix .gitignore or configure a non-mutating setup command."
-                )
+                raise PipelineBlocked("Project setup changed Git-visible files. Fix .gitignore or configure a non-mutating setup command.")
             self.agent.runtime_env = setup_outcome.runtime_env
 
             self.state.set_status(public_id, TaskStatus.DISCOVERY)
             self.state.set_status(public_id, TaskStatus.PLANNING)
             self.state.set_status(public_id, TaskStatus.IMPLEMENTING)
-            implement_context = (
-                self.context.build(worktree, contract, "IMPLEMENTER")
-                + "\n\n"
-                + IMPLEMENTER_SUFFIX
-            )
+            implement_context = self.context.build(worktree, contract, "IMPLEMENTER") + "\n\n" + IMPLEMENTER_SUFFIX
             implemented = False
             last_output = ""
             for attempt in range(1, self.config.implementation_attempts + 1):
-                result = self._agent_run(
-                    task_db_id,
-                    "IMPLEMENTER",
-                    implement_context,
-                    worktree,
-                    attempt,
-                )
+                result = self._agent_run(task_db_id, "IMPLEMENTER", implement_context, worktree, attempt)
                 last_output = result.output
-                self.state.event(
-                    task_db_id,
-                    "IMPLEMENTER_RUN",
-                    f"attempt={attempt} rc={result.returncode}\n{truncate(result.output, 5000)}",
-                )
+                self.state.event(task_db_id, "IMPLEMENTER_RUN", f"attempt={attempt} rc={result.returncode}\n{truncate(result.output, 5000)}")
                 if result.ok and self.git.status(worktree).strip():
                     implemented = True
                     break
             if not implemented:
-                raise PipelineBlocked(
-                    "Implementation did not produce a valid repository change. "
-                    + truncate(last_output, 2000)
-                )
+                raise PipelineBlocked("Implementation did not produce a valid repository change. " + truncate(last_output, 2000))
 
-            quality = QualityEngine(
-                self.config.quality_commands,
-                self.config.command_timeout_seconds,
-                runtime_env=setup_outcome.runtime_env,
-            )
-            security = SecurityEngine(
-                self.config.security_commands,
-                self.config.command_timeout_seconds,
-                runtime_env=setup_outcome.runtime_env,
-            )
+            quality = QualityEngine(self.config.quality_commands, self.config.command_timeout_seconds, runtime_env=setup_outcome.runtime_env)
+            security = SecurityEngine(self.config.security_commands, self.config.command_timeout_seconds, runtime_env=setup_outcome.runtime_env)
 
             self.state.set_status(public_id, TaskStatus.VERIFYING)
             quality_ok = False
             verification_feedback = ""
             for attempt in range(1, self.config.verification_attempts + 1):
                 qresults = quality.execute(worktree)
-                quality_ok = bool(qresults) and self._record_checks(
-                    task_db_id, "quality", qresults
-                )
+                quality_ok = bool(qresults) and self._record_checks(task_db_id, "quality", qresults)
                 diff = self.git.diff(worktree)
                 secret_findings = scan_added_diff(diff)
                 for finding in secret_findings:
-                    self.state.finding(
-                        task_db_id, "secret_scan", "HIGH", finding
-                    )
+                    self.state.finding(task_db_id, "secret_scan", "HIGH", finding)
                 secret_ok = not secret_findings
-                self.state.check(
-                    task_db_id,
-                    "security",
-                    "added-diff-secret-scan",
-                    "PASS" if secret_ok else "FAIL",
-                    summary="\n".join(secret_findings),
-                )
+                self.state.check(task_db_id, "security", "added-diff-secret-scan", "PASS" if secret_ok else "FAIL", summary="\n".join(secret_findings))
                 sresults = security.execute_commands(worktree)
-                sec_cmd_ok = (
-                    self._record_checks(task_db_id, "security", sresults)
-                    if sresults
-                    else True
-                )
+                sec_cmd_ok = self._record_checks(task_db_id, "security", sresults) if sresults else True
                 if quality_ok and secret_ok and sec_cmd_ok:
                     break
-                failure_text = (
-                    "\n".join(
-                        truncate(
-                            (r.stdout or "") + "\n" + (r.stderr or ""), 5000
-                        )
-                        for _, r in qresults + sresults
-                        if not r.ok
-                    )
-                    + "\n"
-                    + "\n".join(secret_findings)
-                )
+                failure_text = "\n".join(
+                    truncate((r.stdout or "") + "\n" + (r.stderr or ""), 5000) for _, r in qresults + sresults if not r.ok
+                ) + "\n" + "\n".join(secret_findings)
                 verification_feedback = failure_text
-                fix_prompt = (
-                    self.context.build(
-                        worktree,
-                        contract,
-                        "IMPLEMENTER",
-                        self.git.diff(worktree),
-                        failure_text,
-                    )
-                    + "\n\n"
-                    + IMPLEMENTER_SUFFIX
-                )
-                fix = self._agent_run(
-                    task_db_id, "IMPLEMENTER", fix_prompt, worktree, attempt
-                )
+                fix_prompt = self.context.build(worktree, contract, "IMPLEMENTER", self.git.diff(worktree), failure_text) + "\n\n" + IMPLEMENTER_SUFFIX
+                fix = self._agent_run(task_db_id, "IMPLEMENTER", fix_prompt, worktree, attempt)
                 if not fix.ok:
                     continue
             else:
-                raise PipelineBlocked(
-                    "Verification retry budget exhausted. "
-                    + truncate(verification_feedback, 2000)
-                )
+                raise PipelineBlocked("Verification retry budget exhausted. " + truncate(verification_feedback, 2000))
 
             if not quality_ok:
-                raise PipelineBlocked(
-                    "No configured or autodetected quality command passed. Configure .ai/config.yml if autodetection is insufficient."
-                )
+                raise PipelineBlocked("No configured or autodetected quality command passed. Configure .ai/config.yml if autodetection is insufficient.")
 
             review_ok = route.risk == Risk.LOW
             security_review_ok = route.risk != Risk.HIGH
@@ -315,148 +189,64 @@ class Orchestrator:
             if route.risk in {Risk.MEDIUM, Risk.HIGH}:
                 for attempt in range(1, self.config.review_attempts + 1):
                     diff = self.git.diff(worktree)
-                    prompt = (
-                        self.context.build(
-                            worktree, contract, "REVIEWER", diff
-                        )
-                        + "\n\n"
-                        + REVIEWER_SUFFIX
-                    )
-                    review = self._agent_run(
-                        task_db_id, "REVIEWER", prompt, worktree, attempt
-                    )
+                    prompt = self.context.build(worktree, contract, "REVIEWER", diff) + "\n\n" + REVIEWER_SUFFIX
+                    review = self._agent_run(task_db_id, "REVIEWER", prompt, worktree, attempt)
                     review_ok = review.ok and self._review_pass(review.output)
-                    self.state.event(
-                        task_db_id, "REVIEW", truncate(review.output, 7000)
-                    )
+                    self.state.event(task_db_id, "REVIEW", truncate(review.output, 7000))
                     if review_ok:
                         break
-                    fix_prompt = (
-                        self.context.build(
-                            worktree,
-                            contract,
-                            "IMPLEMENTER",
-                            diff,
-                            review.output,
-                        )
-                        + "\n\n"
-                        + IMPLEMENTER_SUFFIX
-                    )
-                    fix = self._agent_run(
-                        task_db_id,
-                        "IMPLEMENTER",
-                        fix_prompt,
-                        worktree,
-                        attempt,
-                    )
+                    fix_prompt = self.context.build(worktree, contract, "IMPLEMENTER", diff, review.output) + "\n\n" + IMPLEMENTER_SUFFIX
+                    fix = self._agent_run(task_db_id, "IMPLEMENTER", fix_prompt, worktree, attempt)
                     if not fix.ok:
                         continue
                     qresults = quality.execute(worktree)
-                    quality_ok = bool(qresults) and self._record_checks(
-                        task_db_id, "quality", qresults
-                    )
+                    quality_ok = bool(qresults) and self._record_checks(task_db_id, "quality", qresults)
                     if not quality_ok:
                         continue
                 if not review_ok:
-                    raise PipelineBlocked(
-                        "Independent review did not pass within retry budget."
-                    )
+                    raise PipelineBlocked("Independent review did not pass within retry budget.")
 
             if route.risk == Risk.HIGH:
                 for attempt in range(1, self.config.review_attempts + 1):
                     diff = self.git.diff(worktree)
-                    prompt = (
-                        self.context.build(
-                            worktree, contract, "SECURITY_REVIEWER", diff
-                        )
-                        + "\n\n"
-                        + SECURITY_SUFFIX
-                    )
-                    sreview = self._agent_run(
-                        task_db_id,
-                        "SECURITY_REVIEWER",
-                        prompt,
-                        worktree,
-                        attempt,
-                    )
-                    security_review_ok = sreview.ok and self._review_pass(
-                        sreview.output
-                    )
-                    self.state.event(
-                        task_db_id,
-                        "SECURITY_REVIEW",
-                        truncate(sreview.output, 7000),
-                    )
+                    prompt = self.context.build(worktree, contract, "SECURITY_REVIEWER", diff) + "\n\n" + SECURITY_SUFFIX
+                    sreview = self._agent_run(task_db_id, "SECURITY_REVIEWER", prompt, worktree, attempt)
+                    security_review_ok = sreview.ok and self._review_pass(sreview.output)
+                    self.state.event(task_db_id, "SECURITY_REVIEW", truncate(sreview.output, 7000))
                     if security_review_ok:
                         break
-                    fix_prompt = (
-                        self.context.build(
-                            worktree,
-                            contract,
-                            "IMPLEMENTER",
-                            diff,
-                            sreview.output,
-                        )
-                        + "\n\n"
-                        + IMPLEMENTER_SUFFIX
-                    )
-                    fix = self._agent_run(
-                        task_db_id,
-                        "IMPLEMENTER",
-                        fix_prompt,
-                        worktree,
-                        attempt,
-                    )
+                    fix_prompt = self.context.build(worktree, contract, "IMPLEMENTER", diff, sreview.output) + "\n\n" + IMPLEMENTER_SUFFIX
+                    fix = self._agent_run(task_db_id, "IMPLEMENTER", fix_prompt, worktree, attempt)
                     if not fix.ok:
                         continue
                     qresults = quality.execute(worktree)
-                    quality_ok = bool(qresults) and self._record_checks(
-                        task_db_id, "quality", qresults
-                    )
-                    if not quality_ok or scan_added_diff(
-                        self.git.diff(worktree)
-                    ):
+                    quality_ok = bool(qresults) and self._record_checks(task_db_id, "quality", qresults)
+                    if not quality_ok or scan_added_diff(self.git.diff(worktree)):
                         continue
                 if not security_review_ok:
-                    raise PipelineBlocked(
-                        "Independent security review did not pass within retry budget."
-                    )
+                    raise PipelineBlocked("Independent security review did not pass within retry budget.")
 
             # Final deterministic re-verification. Durable knowledge, when warranted, is
             # updated by the implementer in the same reviewed diff; a separate knowledge
             # agent is intentionally avoided to save tokens.
             qresults = quality.execute(worktree)
-            quality_ok = bool(qresults) and self._record_checks(
-                task_db_id, "quality-final", qresults
-            )
+            quality_ok = bool(qresults) and self._record_checks(task_db_id, "quality-final", qresults)
             diff = self.git.diff(worktree)
             final_secret_findings = scan_added_diff(diff)
             secret_ok = not final_secret_findings
             for finding in final_secret_findings:
                 self.state.finding(task_db_id, "secret_scan", "HIGH", finding)
             sec_results = security.execute_commands(worktree)
-            sec_cmd_ok = (
-                self._record_checks(task_db_id, "security-final", sec_results)
-                if sec_results
-                else True
-            )
+            sec_cmd_ok = self._record_checks(task_db_id, "security-final", sec_results) if sec_results else True
             if not quality_ok or not secret_ok or not sec_cmd_ok:
                 raise PipelineBlocked("Final local gates failed after review.")
 
-            commit_sha = self.git.commit(
-                worktree,
-                f"{public_id}: {task_row.get('title') or task_row['goal'][:72]}",
-            )
+            commit_sha = self.git.commit(worktree, f"{public_id}: {task_row.get('title') or task_row['goal'][:72]}")
             self.git.push(worktree, branch)
 
             self.state.set_status(public_id, TaskStatus.PR_OPEN)
             body = self._pr_body(contract, route, task_row)
-            pr = self.github.create_pr(
-                worktree,
-                task_row.get("title") or public_id,
-                body,
-                self.config.main_branch,
-            )
+            pr = self.github.create_pr(worktree, task_row.get("title") or public_id, body, self.config.main_branch)
             self.state.update_task(public_id, pr_number=pr)
 
             self.state.set_status(public_id, TaskStatus.CI)
@@ -492,134 +282,48 @@ class Orchestrator:
                         "Actions registration. Refusing to auto-merge without CI evidence."
                     )
 
-                failure = json.dumps(
-                    [c for c in checks if c.get("bucket") == "fail"], indent=2
-                )
-                failed_logs = self.github.failed_run_logs(
-                    worktree, branch, self._head(worktree)
-                )
+                failure = json.dumps([c for c in checks if c.get("bucket") == "fail"], indent=2)
+                failed_logs = self.github.failed_run_logs(worktree, branch, self._head(worktree))
                 ci_context = "CI failure metadata:\n" + failure
                 if failed_logs:
-                    ci_context += (
-                        "\n\nFailed GitHub Actions steps/logs:\n"
-                        + truncate(failed_logs, 12000)
-                    )
-                fix_prompt = (
-                    self.context.build(
-                        worktree,
-                        contract,
-                        "IMPLEMENTER",
-                        self.git.diff(worktree),
-                        ci_context,
-                    )
-                    + "\n\n"
-                    + IMPLEMENTER_SUFFIX
-                )
-                fix = self._agent_run(
-                    task_db_id, "IMPLEMENTER", fix_prompt, worktree, ci_attempt
-                )
+                    ci_context += "\n\nFailed GitHub Actions steps/logs:\n" + truncate(failed_logs, 12000)
+                fix_prompt = self.context.build(worktree, contract, "IMPLEMENTER", self.git.diff(worktree), ci_context) + "\n\n" + IMPLEMENTER_SUFFIX
+                fix = self._agent_run(task_db_id, "IMPLEMENTER", fix_prompt, worktree, ci_attempt)
                 if not fix.ok or not self.git.status(worktree).strip():
                     continue
                 qresults = quality.execute(worktree)
-                quality_ok = bool(qresults) and self._record_checks(
-                    task_db_id, "quality-ci-fix", qresults
-                )
+                quality_ok = bool(qresults) and self._record_checks(task_db_id, "quality-ci-fix", qresults)
                 diff = self.git.diff(worktree)
                 secret_ok = not scan_added_diff(diff)
                 sec_results = security.execute_commands(worktree)
-                sec_cmd_ok = (
-                    self._record_checks(
-                        task_db_id, "security-ci-fix", sec_results
-                    )
-                    if sec_results
-                    else True
-                )
+                sec_cmd_ok = self._record_checks(task_db_id, "security-ci-fix", sec_results) if sec_results else True
                 if not quality_ok or not secret_ok or not sec_cmd_ok:
                     continue
 
                 # A CI repair changed the reviewed code. Re-run semantic gates before pushing it.
                 if route.risk in {Risk.MEDIUM, Risk.HIGH}:
-                    rprompt = (
-                        self.context.build(
-                            worktree, contract, "REVIEWER", diff
-                        )
-                        + "\n\n"
-                        + REVIEWER_SUFFIX
-                    )
-                    rereview = self._agent_run(
-                        task_db_id, "REVIEWER", rprompt, worktree, ci_attempt
-                    )
-                    review_ok = rereview.ok and self._review_pass(
-                        rereview.output
-                    )
+                    rprompt = self.context.build(worktree, contract, "REVIEWER", diff) + "\n\n" + REVIEWER_SUFFIX
+                    rereview = self._agent_run(task_db_id, "REVIEWER", rprompt, worktree, ci_attempt)
+                    review_ok = rereview.ok and self._review_pass(rereview.output)
                     if not review_ok:
-                        repair_prompt = (
-                            self.context.build(
-                                worktree,
-                                contract,
-                                "IMPLEMENTER",
-                                diff,
-                                rereview.output,
-                            )
-                            + "\n\n"
-                            + IMPLEMENTER_SUFFIX
-                        )
-                        repair = self._agent_run(
-                            task_db_id,
-                            "IMPLEMENTER",
-                            repair_prompt,
-                            worktree,
-                            ci_attempt,
-                        )
+                        repair_prompt = self.context.build(worktree, contract, "IMPLEMENTER", diff, rereview.output) + "\n\n" + IMPLEMENTER_SUFFIX
+                        repair = self._agent_run(task_db_id, "IMPLEMENTER", repair_prompt, worktree, ci_attempt)
                         if not repair.ok:
                             continue
                         qresults = quality.execute(worktree)
-                        quality_ok = bool(qresults) and self._record_checks(
-                            task_db_id, "quality-ci-review-repair", qresults
-                        )
+                        quality_ok = bool(qresults) and self._record_checks(task_db_id, "quality-ci-review-repair", qresults)
                         diff = self.git.diff(worktree)
                         if not quality_ok or scan_added_diff(diff):
                             continue
-                        rprompt = (
-                            self.context.build(
-                                worktree, contract, "REVIEWER", diff
-                            )
-                            + "\n\n"
-                            + REVIEWER_SUFFIX
-                        )
-                        rereview = self._agent_run(
-                            task_db_id,
-                            "REVIEWER",
-                            rprompt,
-                            worktree,
-                            ci_attempt,
-                        )
-                        review_ok = rereview.ok and self._review_pass(
-                            rereview.output
-                        )
+                        rprompt = self.context.build(worktree, contract, "REVIEWER", diff) + "\n\n" + REVIEWER_SUFFIX
+                        rereview = self._agent_run(task_db_id, "REVIEWER", rprompt, worktree, ci_attempt)
+                        review_ok = rereview.ok and self._review_pass(rereview.output)
                         if not review_ok:
                             continue
                 if route.risk == Risk.HIGH:
-                    sprompt = (
-                        self.context.build(
-                            worktree,
-                            contract,
-                            "SECURITY_REVIEWER",
-                            self.git.diff(worktree),
-                        )
-                        + "\n\n"
-                        + SECURITY_SUFFIX
-                    )
-                    sre = self._agent_run(
-                        task_db_id,
-                        "SECURITY_REVIEWER",
-                        sprompt,
-                        worktree,
-                        ci_attempt,
-                    )
-                    security_review_ok = sre.ok and self._review_pass(
-                        sre.output
-                    )
+                    sprompt = self.context.build(worktree, contract, "SECURITY_REVIEWER", self.git.diff(worktree)) + "\n\n" + SECURITY_SUFFIX
+                    sre = self._agent_run(task_db_id, "SECURITY_REVIEWER", sprompt, worktree, ci_attempt)
+                    security_review_ok = sre.ok and self._review_pass(sre.output)
                     if not security_review_ok:
                         continue
 
@@ -630,10 +334,7 @@ class Orchestrator:
                 raise PipelineBlocked("CI retry budget exhausted.")
 
             pr_state = self.github.pr_state(worktree, pr)
-            mergeable = (
-                pr_state.get("mergeable") == "MERGEABLE"
-                and pr_state.get("state") == "OPEN"
-            )
+            mergeable = pr_state.get("mergeable") == "MERGEABLE" and pr_state.get("state") == "OPEN"
             evidence = MergeEvidence(
                 quality_passed=quality_ok,
                 secret_scan_passed=secret_ok,
@@ -646,9 +347,7 @@ class Orchestrator:
             if not merge_allowed(evidence):
                 raise PipelineBlocked(f"Merge policy denied merge: {evidence}")
             if not self.config.auto_merge:
-                raise PipelineBlocked(
-                    "All gates passed, but auto_merge=false in configuration."
-                )
+                raise PipelineBlocked("All gates passed, but auto_merge=false in configuration.")
 
             self.state.set_status(public_id, TaskStatus.MERGING)
             head_sha = pr_state.get("headRefOid") or commit_sha
@@ -664,9 +363,7 @@ class Orchestrator:
                     break
                 time.sleep(10)
             else:
-                raise PipelineBlocked(
-                    "PR passed all gates but has not reached MERGED state before timeout (possibly merge queue/policy)."
-                )
+                raise PipelineBlocked("PR passed all gates but has not reached MERGED state before timeout (possibly merge queue/policy).")
 
         except PipelineBlocked as exc:
             self.state.set_status(public_id, TaskStatus.BLOCKED, str(exc))
@@ -679,31 +376,12 @@ class Orchestrator:
             if current["status"] == TaskStatus.DONE and worktree and branch:
                 self.git.cleanup(worktree, branch)
 
-    def _agent_run(
-        self,
-        task_db_id: int,
-        role: str,
-        prompt: str,
-        workspace: Path,
-        attempt: int,
-    ):
-        run_id = self.state.start_run(
-            task_db_id, role, self.agent.name, attempt
-        )
+    def _agent_run(self, task_db_id: int, role: str, prompt: str, workspace: Path, attempt: int):
+        run_id = self.state.start_run(task_db_id, role, self.agent.name, attempt)
         try:
             result = self.agent.run(role, prompt, workspace)
-            self.state.finish_run(
-                run_id,
-                "PASS" if result.ok else "FAIL",
-                truncate(result.output, 5000),
-            )
-            self.state.record_usage(
-                task_db_id,
-                run_id,
-                self.agent.name,
-                result.input_tokens,
-                result.output_tokens,
-            )
+            self.state.finish_run(run_id, "PASS" if result.ok else "FAIL", truncate(result.output, 5000))
+            self.state.record_usage(task_db_id, run_id, self.agent.name, result.input_tokens, result.output_tokens)
             return result
         except Exception as exc:
             self.state.finish_run(run_id, "ERROR", str(exc))
@@ -711,15 +389,10 @@ class Orchestrator:
 
     def _head(self, worktree: Path) -> str:
         from .util import run
-
         return run(["git", "rev-parse", "HEAD"], worktree).stdout.strip()
 
     def _pr_body(self, contract: TaskContract, route, task_row: dict) -> str:
-        closes = (
-            f"Closes #{task_row['source_reference']}\n\n"
-            if task_row.get("source") == "github_issue"
-            else ""
-        )
+        closes = f"Closes #{task_row['source_reference']}\n\n" if task_row.get("source") == "github_issue" else ""
         criteria = "\n".join(f"- {x}" for x in contract.acceptance_criteria)
         return (
             f"{closes}Automated by AIpipe {contract.id}.\n\n"
