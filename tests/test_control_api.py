@@ -31,6 +31,47 @@ def test_control_api_project_and_task(monkeypatch, tmp_path):
         assert events[0]["kind"] == "QUEUED"
 
 
+def test_control_api_task_activity_is_human_readable_and_events_stay_raw(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'api.db'}")
+    monkeypatch.setenv("AIPIPE_DEV_AUTH", "true")
+    monkeypatch.setenv("AIPIPE_REPOS_ROOT", str(tmp_path / "repos"))
+    monkeypatch.setenv("AIPIPE_SESSION_SECRET", "x" * 40)
+    import aipipe.control.app as app_module
+    app_module = importlib.reload(app_module)
+    with TestClient(app_module.app) as client:
+        project = client.post("/projects", json={"name": "Demo", "local_path": str(repo), "agent": "claude", "model": "sonnet"})
+        pid = project.json()["id"]
+        task = client.post(f"/projects/{pid}/tasks", json={"prompt": "Add a small test"})
+        tid = task.json()["id"]
+
+        # Raw events remain exactly as recorded, for backward compatibility.
+        events = client.get(f"/tasks/{tid}/events").json()
+        assert events == [{"id": events[0]["id"], "task_id": tid, "kind": "QUEUED", "detail": "Prompt task queued", "created_at": events[0]["created_at"]}]
+
+        activity = client.get(f"/tasks/{tid}/activity")
+        assert activity.status_code == 200
+        body = activity.json()
+        assert body["items"][0]["title"] == "Queued"
+        assert body["items"][0]["category"] == "QUEUED"
+        assert body["current"]["title"] == "Queued"
+        assert body["current"]["agent_label"] == "Claude · sonnet"
+        assert body["blocker"] is None
+        assert body["checks"] == {"checks": [], "review": None, "security_review": None, "ci": None}
+
+
+def test_control_api_task_activity_not_found(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'api.db'}")
+    monkeypatch.setenv("AIPIPE_DEV_AUTH", "true")
+    monkeypatch.setenv("AIPIPE_REPOS_ROOT", str(tmp_path / "repos"))
+    monkeypatch.setenv("AIPIPE_SESSION_SECRET", "x" * 40)
+    import aipipe.control.app as app_module
+    app_module = importlib.reload(app_module)
+    with TestClient(app_module.app) as client:
+        assert client.get("/tasks/does-not-exist/activity").status_code == 404
+
+
 def test_control_api_agent_models(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'api.db'}")
     monkeypatch.setenv("AIPIPE_DEV_AUTH", "true")

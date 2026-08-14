@@ -13,6 +13,7 @@ from sqlalchemy import desc, select
 
 from aipipe.agents import AGENT_MODELS
 
+from .activity import build_activity_feed
 from .auth import (
     OAUTH_STATE_COOKIE,
     clear_session_cookie,
@@ -26,13 +27,32 @@ from .config import load_settings
 from .db import Database
 from .github_app import GitHubAppAuth, list_app_installations
 from .models import ControlEvent, ControlTask, Project, User, WebhookDelivery
-from .schemas import EventOut, IssueOut, IssueTaskCreate, ProjectCreate, ProjectOut, TaskCreate, TaskOut, UserOut
+from .schemas import (
+    ActivityFeedOut,
+    EventOut,
+    IssueOut,
+    IssueTaskCreate,
+    ProjectCreate,
+    ProjectOut,
+    TaskCreate,
+    TaskOut,
+    UserOut,
+)
 from .security import verify_github_signature
 from .service import TERMINAL, add_event
 
 
 settings = load_settings()
 database = Database(settings)
+
+AGENT_LABELS = {"claude": "Claude", "codex": "Codex"}
+
+
+def _agent_label(project: Project | None) -> str:
+    if not project:
+        return "AIpipe"
+    base = AGENT_LABELS.get(project.agent, project.agent.title())
+    return f"{base} · {project.model}" if project.model else base
 
 
 def _startup_checks() -> None:
@@ -270,6 +290,17 @@ def get_task(task_id: str, _: User = Depends(current_user)):
 def task_events(task_id: str, _: User = Depends(current_user)):
     with database.session() as db:
         return list(db.scalars(select(ControlEvent).where(ControlEvent.task_id == task_id).order_by(ControlEvent.id)).all())
+
+
+@app.get("/tasks/{task_id}/activity", response_model=ActivityFeedOut)
+def task_activity(task_id: str, _: User = Depends(current_user)):
+    with database.session() as db:
+        task = db.get(ControlTask, task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        project = db.get(Project, task.project_id)
+        events = list(db.scalars(select(ControlEvent).where(ControlEvent.task_id == task_id).order_by(ControlEvent.id)).all())
+        return build_activity_feed(task, events, _agent_label(project))
 
 
 @app.get("/tasks/{task_id}/stream")
