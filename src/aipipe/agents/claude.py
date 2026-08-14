@@ -19,7 +19,7 @@ class ClaudeAdapter:
 
     def run(self, role: str, prompt: str, workspace: Path) -> AgentResult:
         binary = self.config.get("binary", "claude")
-        cmd = [binary, "-p", "--bare", "--no-session-persistence", "--output-format", "json"]
+        cmd = [binary, "-p", "--no-session-persistence", "--output-format", "json"]
         if role in {"REVIEWER", "SECURITY_REVIEWER", "ROUTER"}:
             cmd += ["--tools", "Read,Grep,Glob", "--permission-mode", "auto"]
         else:
