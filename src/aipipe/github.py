@@ -824,6 +824,15 @@ class GitHubAdapter:
             "--squash",
         )
 
+        # Do not use --delete-branch here.
+        #
+        # AIpipe uses Git worktrees. `gh pr merge --delete-branch`
+        # may try to switch this worktree to the base branch after
+        # the remote merge. That fails when the base branch (usually
+        # main) is already checked out in AIpipe's primary repository.
+        #
+        # Local task worktree/branch cleanup is handled separately by
+        # GitManager.cleanup() after the task reaches DONE.
         r = self._run(
             [
                 "gh",
@@ -831,7 +840,6 @@ class GitHubAdapter:
                 "merge",
                 str(pr),
                 flag,
-                "--delete-branch",
                 "--match-head-commit",
                 head_sha,
             ],
