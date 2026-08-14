@@ -47,21 +47,22 @@ class Database:
 
         # Backward-compatible lightweight migration for databases created
         # before Project.model was added.
+        table_name = "control_projects"
         inspector = inspect(self.engine)
 
-        if "projects" not in inspector.get_table_names():
+        if table_name not in inspector.get_table_names():
             return
 
         columns = {
             column["name"]
-            for column in inspector.get_columns("projects")
+            for column in inspector.get_columns(table_name)
         }
 
         if "model" not in columns:
             with self.engine.begin() as connection:
                 connection.execute(
                     text(
-                        "ALTER TABLE projects "
+                        "ALTER TABLE control_projects "
                         "ADD COLUMN model VARCHAR(64)"
                     )
                 )
