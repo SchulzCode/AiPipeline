@@ -11,6 +11,8 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import desc, select
 
+from aipipe.agents import AGENT_MODELS
+
 from .auth import (
     OAUTH_STATE_COOKIE,
     clear_session_cookie,
@@ -127,6 +129,14 @@ def logout(_: User = Depends(current_user)) -> Response:
     response = Response(status_code=204)
     clear_session_cookie(response)
     return response
+
+
+@app.get("/agents/models")
+def agent_model_options(_: User = Depends(current_user)):
+    return {
+        name: [{"id": m.id, "label": m.label} for m in models]
+        for name, models in AGENT_MODELS.items()
+    }
 
 
 @app.get("/projects", response_model=list[ProjectOut])

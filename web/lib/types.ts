@@ -8,10 +8,13 @@ export type Project = {
   installation_id?: number | null;
   default_branch: string;
   agent: "codex" | "claude" | string;
+  model?: string | null;
   enabled: boolean;
   status: string;
   created_at: string;
 };
+export type AgentModelOption = { id: string | null; label: string };
+export type AgentModels = Record<string, AgentModelOption[]>;
 export type Task = {
   id: string;
   project_id: string;

@@ -33,6 +33,7 @@ class Orchestrator:
         agent_override: str | None = None,
         state_observer: Callable[[str, dict], None] | None = None,
         github_env_provider: Callable[[], dict[str, str]] | None = None,
+        model_override: str | None = None,
     ):
         self.repo = repo.resolve()
         self.home = home_dir()
@@ -62,7 +63,7 @@ class Orchestrator:
         )
 
         self.context = ContextBuilder(self.home / "global")
-        self.agent = build_agent(self.config.agent, self.config)
+        self.agent = build_agent(self.config.agent, self.config, model=model_override)
 
     def _project(self) -> int:
         return self.state.project_id(

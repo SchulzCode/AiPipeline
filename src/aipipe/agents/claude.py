@@ -4,12 +4,21 @@ import json
 import os
 from pathlib import Path
 
-from .base import AgentResult
+from .base import AgentResult, ModelOption
 from ..util import require_binary, run, safe_process_env, truncate
 
 
 class ClaudeAdapter:
     name = "claude"
+
+    # Claude Code CLI model aliases, resolved by the CLI itself to its
+    # current underlying model. Using aliases (rather than dated model ids)
+    # keeps this list stable as Anthropic ships new model versions.
+    MODELS = [
+        ModelOption(id=None, label="Default (automatic)"),
+        ModelOption(id="sonnet", label="Sonnet"),
+        ModelOption(id="opus", label="Opus"),
+    ]
 
     def __init__(self, config: dict, timeout: int = 3600, runtime_env: dict[str, str] | None = None):
         self.config = config

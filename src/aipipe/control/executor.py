@@ -61,6 +61,7 @@ class TaskExecutor:
             db.flush()
             project_id = project.id
             project_agent = project.agent
+            project_model = project.model
             source = task.source
             source_ref = task.source_reference
             prompt = task.prompt
@@ -85,7 +86,7 @@ class TaskExecutor:
         task_home.mkdir(parents=True, exist_ok=True)
         os.environ["AIPIPE_HOME"] = str(task_home)
         try:
-            orch = Orchestrator(repo, agent_override=project_agent, state_observer=observer, github_env_provider=env_provider)
+            orch = Orchestrator(repo, agent_override=project_agent, model_override=project_model, state_observer=observer, github_env_provider=env_provider)
             if source == "github_issue":
                 core_id, labels = orch.enqueue_issue_task(int(source_ref or "0"))
             else:

@@ -5,6 +5,8 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from ..agents import agent_models
+
 
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
@@ -24,6 +26,7 @@ class ProjectCreate(BaseModel):
     installation_id: int | None = None
     default_branch: str = "main"
     agent: Literal["codex", "claude"] = "codex"
+    model: str | None = None
 
     @model_validator(mode="after")
     def source_present(self):
@@ -31,6 +34,15 @@ class ProjectCreate(BaseModel):
             raise ValueError("Provide local_path or a GitHub repository")
         if self.repository_full_name and not self.repository_url:
             self.repository_url = f"https://github.com/{self.repository_full_name}.git"
+        return self
+
+    @model_validator(mode="after")
+    def model_matches_agent(self):
+        if self.model is None:
+            return self
+        valid_ids = {m.id for m in agent_models(self.agent) if m.id}
+        if self.model not in valid_ids:
+            raise ValueError(f"Model '{self.model}' is not available for agent '{self.agent}'")
         return self
 
 
@@ -43,6 +55,7 @@ class ProjectOut(ORMModel):
     installation_id: int | None
     default_branch: str
     agent: str
+    model: str | None = None
     enabled: bool
     status: str
     created_at: datetime

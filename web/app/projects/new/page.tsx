@@ -4,7 +4,7 @@ import { FormEvent, useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 import { api } from "@/lib/api";
-import type { Installation, Repository } from "@/lib/types";
+import type { AgentModels, Installation, Repository } from "@/lib/types";
 
 export default function NewProject() {
   const router = useRouter();
@@ -13,6 +13,8 @@ export default function NewProject() {
   const [name, setName] = useState("");
   const [localPath, setLocalPath] = useState("");
   const [agent, setAgent] = useState("codex");
+  const [agentModels, setAgentModels] = useState<AgentModels>({});
+  const [model, setModel] = useState("");
 
   const [installations, setInstallations] = useState<Installation[]>([]);
   const [installation, setInstallation] = useState("");
@@ -21,6 +23,22 @@ export default function NewProject() {
 
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    api.agentModels()
+      .then((items) => {
+        if (!cancelled) {
+          setAgentModels(items);
+        }
+      })
+      .catch(() => undefined);
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   useEffect(() => {
     if (mode !== "github") {
@@ -89,6 +107,14 @@ export default function NewProject() {
     setError("");
   }
 
+  function handleAgentChange(value: string) {
+    setAgent(value);
+
+    // Available models depend on the selected agent, so reset the
+    // selection back to Default/Automatic whenever the agent changes.
+    setModel("");
+  }
+
   function handleRepositoryChange(value: string) {
     setRepo(value);
 
@@ -118,6 +144,7 @@ export default function NewProject() {
           || "Project",
 
         agent,
+        model: model || null,
 
         ...(mode === "github"
           ? {
@@ -267,7 +294,7 @@ export default function NewProject() {
           <select
             value={agent}
             onChange={(e) =>
-              setAgent(e.target.value)
+              handleAgentChange(e.target.value)
             }
             className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5"
           >
@@ -278,6 +305,27 @@ export default function NewProject() {
             <option value="claude">
               Claude Code
             </option>
+          </select>
+        </label>
+
+        <label className="block text-sm">
+          Model
+
+          <select
+            value={model}
+            onChange={(e) =>
+              setModel(e.target.value)
+            }
+            className="mt-2 w-full rounded-xl border border-white/10 bg-black/30 px-3 py-2.5"
+          >
+            {(agentModels[agent] || []).map((item) => (
+              <option
+                key={item.id ?? ""}
+                value={item.id ?? ""}
+              >
+                {item.label}
+              </option>
+            ))}
           </select>
         </label>
 

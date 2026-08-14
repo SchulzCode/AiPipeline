@@ -1,10 +1,26 @@
+from .base import ModelOption
 from .claude import ClaudeAdapter
 from .codex import CodexAdapter
 
+# Model lists live on each adapter (the agent abstraction); this registry is
+# just a lookup so callers never need agent-specific branching to find them.
+AGENT_MODELS: dict[str, list[ModelOption]] = {
+    "claude": ClaudeAdapter.MODELS,
+    "codex": CodexAdapter.MODELS,
+}
 
-def build_agent(name: str, config, timeout: int = 3600, runtime_env: dict[str, str] | None = None):
+
+def agent_models(name: str) -> list[ModelOption]:
+    if name not in AGENT_MODELS:
+        raise ValueError(f"Unsupported agent backend: {name}")
+    return AGENT_MODELS[name]
+
+
+def build_agent(name: str, config, timeout: int = 3600, runtime_env: dict[str, str] | None = None, model: str | None = None):
     if name == "claude":
-        return ClaudeAdapter(config.claude, timeout, runtime_env=runtime_env)
+        agent_config = {**config.claude, "model": model} if model else config.claude
+        return ClaudeAdapter(agent_config, timeout, runtime_env=runtime_env)
     if name == "codex":
-        return CodexAdapter(config.codex, timeout, runtime_env=runtime_env)
+        agent_config = {**config.codex, "model": model} if model else config.codex
+        return CodexAdapter(agent_config, timeout, runtime_env=runtime_env)
     raise ValueError(f"Unsupported agent backend: {name}")

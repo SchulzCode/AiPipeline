@@ -4,12 +4,19 @@ import json
 import os
 from pathlib import Path
 
-from .base import AgentResult
+from .base import AgentResult, ModelOption
 from ..util import require_binary, run, safe_process_env, truncate
 
 
 class CodexAdapter:
     name = "codex"
+
+    # Codex CLI model names accepted by --model.
+    MODELS = [
+        ModelOption(id=None, label="Default (automatic)"),
+        ModelOption(id="gpt-5-codex", label="GPT-5 Codex"),
+        ModelOption(id="gpt-5", label="GPT-5"),
+    ]
 
     def __init__(self, config: dict, timeout: int = 3600, runtime_env: dict[str, str] | None = None):
         self.config = config
