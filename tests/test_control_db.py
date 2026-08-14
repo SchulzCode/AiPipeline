@@ -43,3 +43,25 @@ def test_control_database_roundtrip(tmp_path):
         assert task and task.status == "QUEUED"
         events = list(s.scalars(select(ControlEvent).where(ControlEvent.task_id == task_id)))
         assert [e.kind for e in events] == ["QUEUED"]
+
+
+def test_project_model_defaults_to_none_for_backward_compatibility(tmp_path):
+    db = Database(settings(tmp_path))
+    db.create_all()
+    with db.session() as s:
+        project = Project(name="demo", local_path=str(tmp_path), agent="codex")
+        s.add(project); s.flush()
+        project_id = project.id
+    with db.session() as s:
+        assert s.get(Project, project_id).model is None
+
+
+def test_project_model_roundtrip(tmp_path):
+    db = Database(settings(tmp_path))
+    db.create_all()
+    with db.session() as s:
+        project = Project(name="demo", local_path=str(tmp_path), agent="claude", model="sonnet")
+        s.add(project); s.flush()
+        project_id = project.id
+    with db.session() as s:
+        assert s.get(Project, project_id).model == "sonnet"

@@ -1,4 +1,4 @@
-import type { Event, Installation, Issue, Project, Repository, Task, User } from "./types";
+import type { AgentModels, Event, Installation, Issue, Project, Repository, Task, User } from "./types";
 
 export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -22,6 +22,7 @@ export const api = {
   projects: () => request<Project[]>("/projects"),
   project: (id: string) => request<Project>(`/projects/${id}`),
   createProject: (data: object) => request<Project>("/projects", { method: "POST", body: JSON.stringify(data) }),
+  agentModels: () => request<AgentModels>("/agents/models"),
   installations: () => request<Installation[]>("/github/installations"),
   installationRepos: (id: number) => request<Repository[]>(`/github/installations/${id}/repositories`),
   tasks: (projectId: string) => request<Task[]>(`/projects/${projectId}/tasks`),

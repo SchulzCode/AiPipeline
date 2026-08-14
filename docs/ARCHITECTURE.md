@@ -52,7 +52,7 @@ The core emits observations into the control database; the API exposes them over
 
 ### Agent adapters
 
-`CodexAdapter` and `ClaudeAdapter` implement the same logical role interface. Agent selection is per project and can be overridden by CLI.
+`CodexAdapter` and `ClaudeAdapter` implement the same logical role interface. Agent selection is per project and can be overridden by CLI. Each adapter also exposes its own `MODELS` list (a Default/Automatic option plus the concrete models it supports); a project may pin one of those, stored alongside its agent choice and forwarded to the adapter's `model` config key. Leaving it unset preserves the adapter's own default behavior.
 
 Roles used by v1.0:
 

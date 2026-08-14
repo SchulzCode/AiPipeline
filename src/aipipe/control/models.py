@@ -32,6 +32,7 @@ class Project(Base):
     installation_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     default_branch: Mapped[str] = mapped_column(String(255), default="main")
     agent: Mapped[str] = mapped_column(String(32), default="codex")
+    model: Mapped[str | None] = mapped_column(String(64), nullable=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     status: Mapped[str] = mapped_column(String(32), default="IDLE")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)

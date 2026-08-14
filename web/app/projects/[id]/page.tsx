@@ -116,7 +116,7 @@ export default function ProjectPage() {
             <StatusBadge status={project.status} />
 
             <span className="text-sm text-zinc-500">
-              {project.agent} · {project.default_branch}
+              {project.agent} · {project.model || "Default model"} · {project.default_branch}
             </span>
           </div>
         </div>
