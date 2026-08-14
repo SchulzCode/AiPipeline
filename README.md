@@ -4,6 +4,8 @@ AIpipe is a self-hosted, agent-agnostic software-engineering control center. You
 
 The browser is deliberately **only a control plane**. Git, agent execution, quality gates, merge policy, task state, and project knowledge live in the Python pipeline/worker.
 
+AIpipe is agent-agnostic: it supports both **Claude Code** and **Codex** as pluggable implementation agent backends.
+
 ## What is included
 
 - **Next.js + TypeScript + Tailwind** control-center UI
