@@ -40,6 +40,73 @@ class GitHubAdapter:
             inherit_env=False,
         )
 
+    @staticmethod
+    def _parse_json_object(
+        raw: str,
+        context: str,
+    ) -> dict:
+        if not raw.strip():
+            raise RuntimeError(
+                f"{context} returned an empty response."
+            )
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"{context} returned invalid JSON: {exc}"
+            ) from exc
+
+        if not isinstance(data, dict):
+            raise RuntimeError(
+                f"{context} returned unexpected JSON type: "
+                f"{type(data).__name__}"
+            )
+
+        return data
+
+    @staticmethod
+    def _parse_json_list(
+        raw: str,
+        context: str,
+    ) -> list[dict]:
+        if not raw.strip():
+            return []
+
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(
+                f"{context} returned invalid JSON: {exc}"
+            ) from exc
+
+        if not isinstance(data, list):
+            raise RuntimeError(
+                f"{context} returned unexpected JSON type: "
+                f"{type(data).__name__}"
+            )
+
+        return [
+            item
+            for item in data
+            if isinstance(item, dict)
+        ]
+
+    @staticmethod
+    def _command_error(
+        prefix: str,
+        result,
+    ) -> RuntimeError:
+        detail = (
+            result.stderr
+            or result.stdout
+            or "unknown error"
+        ).strip()
+
+        return RuntimeError(
+            f"{prefix}: {detail}"
+        )
+
     def issue(
         self,
         number: int,
@@ -57,9 +124,15 @@ class GitHubAdapter:
         )
 
         if not r.ok:
-            raise RuntimeError(r.stderr)
+            raise self._command_error(
+                "Failed to read GitHub issue",
+                r,
+            )
 
-        return json.loads(r.stdout)
+        return self._parse_json_object(
+            r.stdout,
+            "gh issue view",
+        )
 
     def create_pr(
         self,
@@ -84,7 +157,10 @@ class GitHubAdapter:
         )
 
         if not r.ok:
-            raise RuntimeError(r.stderr)
+            raise self._command_error(
+                "Failed to create GitHub pull request",
+                r,
+            )
 
         view = self._run(
             [
@@ -100,32 +176,20 @@ class GitHubAdapter:
         )
 
         if not view.ok:
-            raise RuntimeError(view.stderr)
-
-        return int(
-            view.stdout.strip()
-        )
-
-    @staticmethod
-    def _json_list(
-        raw: str,
-    ) -> list[dict]:
-        if not raw.strip():
-            return []
+            raise self._command_error(
+                "Failed to resolve created pull request number",
+                view,
+            )
 
         try:
-            data = json.loads(raw)
-        except json.JSONDecodeError:
-            return []
-
-        if not isinstance(data, list):
-            return []
-
-        return [
-            item
-            for item in data
-            if isinstance(item, dict)
-        ]
+            return int(
+                view.stdout.strip()
+            )
+        except ValueError as exc:
+            raise RuntimeError(
+                "GitHub returned an invalid pull request "
+                f"number: {view.stdout!r}"
+            ) from exc
 
     @staticmethod
     def _state_from_check_records(
@@ -134,15 +198,14 @@ class GitHubAdapter:
     ) -> str:
         buckets = {
             str(
-                item.get("bucket") or ""
+                item.get("bucket")
+                or ""
             ).lower()
             for item in data
         }
 
         buckets.discard("")
 
-        # Failed or cancelled checks must
-        # never be treated as green.
         if (
             "fail" in buckets
             or "cancel" in buckets
@@ -170,16 +233,16 @@ class GitHubAdapter:
         return "none"
 
     @staticmethod
-    def _workflow_run_bucket(
-        run_data: dict,
+    def _check_run_bucket(
+        check_run: dict,
     ) -> str:
         status = str(
-            run_data.get("status")
+            check_run.get("status")
             or ""
         ).lower()
 
         conclusion = str(
-            run_data.get("conclusion")
+            check_run.get("conclusion")
             or ""
         ).lower()
 
@@ -211,20 +274,14 @@ class GitHubAdapter:
         }:
             return "fail"
 
-        if (
-            status == "completed"
-            and not conclusion
-        ):
-            # A completed workflow without
-            # a successful known conclusion
-            # is insufficient evidence to
-            # auto-merge.
+        # A completed run without a recognized
+        # successful conclusion is not sufficient
+        # evidence for auto-merge.
+        if status == "completed":
             return "fail"
 
-        # Unknown non-terminal states are
-        # treated as pending so the
-        # orchestrator waits rather than
-        # merging without evidence.
+        # Unknown non-terminal states are treated
+        # conservatively as pending.
         return "pending"
 
     def _pr_head_sha(
@@ -247,70 +304,138 @@ class GitHubAdapter:
         )
 
         if not r.ok:
-            return ""
+            raise self._command_error(
+                f"Failed to resolve head SHA for PR #{pr}",
+                r,
+            )
 
         return r.stdout.strip()
 
-    def _workflow_runs_for_pr_head(
+    def _api_check_runs_for_ref(
         self,
         worktree: Path,
         head_sha: str,
-        limit: int = 100,
+        pr: int,
     ) -> list[dict]:
-        if not head_sha:
-            return []
-
+        # Query the Checks REST API directly.
+        #
+        # This avoids relying only on
+        # `gh pr checks` when the CLI reports
+        # an empty list even though GitHub has
+        # actual check runs for the PR head SHA.
         r = self._run(
             [
                 "gh",
-                "run",
-                "list",
-                "--commit",
-                head_sha,
-                "--event",
-                "pull_request",
-                "--json",
+                "api",
+                "--method",
+                "GET",
                 (
-                    "databaseId,headSha,"
-                    "workflowName,status,"
-                    "conclusion,url,event"
+                    "repos/{owner}/{repo}/commits/"
+                    f"{head_sha}/check-runs"
                 ),
-                "--limit",
-                str(limit),
+                "-H",
+                "Accept: application/vnd.github+json",
+                "-H",
+                "X-GitHub-Api-Version: 2026-03-10",
+                "-f",
+                "per_page=100",
+                "-f",
+                "filter=latest",
             ],
             worktree,
         )
 
-        if (
-            not r.ok
-            and not r.stdout.strip()
-        ):
-            return []
+        if not r.ok:
+            raise self._command_error(
+                (
+                    "GitHub Checks API query failed "
+                    f"for PR #{pr} ({head_sha})"
+                ),
+                r,
+            )
 
-        runs = self._json_list(
-            r.stdout
+        payload = self._parse_json_object(
+            r.stdout,
+            "GitHub Checks API",
         )
+
+        raw_runs = payload.get(
+            "check_runs",
+            [],
+        )
+
+        if not isinstance(
+            raw_runs,
+            list,
+        ):
+            raise RuntimeError(
+                "GitHub Checks API response has "
+                "invalid check_runs data."
+            )
 
         records: list[dict] = []
 
-        for item in runs:
-            bucket = (
-                self._workflow_run_bucket(
-                    item
-                )
+        for item in raw_runs:
+            if not isinstance(
+                item,
+                dict,
+            ):
+                continue
+
+            # GitHub check runs may include explicit
+            # PR association metadata.
+            #
+            # If it exists, only use checks related
+            # to this PR.
+            #
+            # Some providers omit this array entirely,
+            # so missing/empty metadata is not discarded.
+            pull_requests = item.get(
+                "pull_requests"
             )
 
-            workflow_name = (
-                item.get("workflowName")
-                or (
-                    "workflow-run-"
-                    f"{item.get('databaseId', 'unknown')}"
+            if (
+                isinstance(
+                    pull_requests,
+                    list,
                 )
+                and pull_requests
+            ):
+                associated_numbers = {
+                    p.get("number")
+                    for p in pull_requests
+                    if isinstance(
+                        p,
+                        dict,
+                    )
+                }
+
+                if (
+                    pr
+                    not in associated_numbers
+                ):
+                    continue
+
+            app = item.get("app")
+
+            app_slug = (
+                app.get("slug")
+                if isinstance(
+                    app,
+                    dict,
+                )
+                else None
             )
 
             records.append(
                 {
-                    "name": workflow_name,
+                    "name": (
+                        item.get("name")
+                        or (
+                            "check-run-"
+                            f"{item.get('id', 'unknown')}"
+                        )
+                    ),
                     "state": (
                         item.get(
                             "conclusion"
@@ -320,28 +445,34 @@ class GitHubAdapter:
                         )
                         or "unknown"
                     ),
-                    "bucket": bucket,
+                    "bucket": (
+                        self._check_run_bucket(
+                            item
+                        )
+                    ),
                     "link": (
-                        item.get("url")
+                        item.get(
+                            "html_url"
+                        )
+                        or item.get(
+                            "details_url"
+                        )
                         or ""
                     ),
                     "source": (
-                        "workflow_run_fallback"
+                        "checks_api"
                     ),
                     "databaseId": (
-                        item.get(
-                            "databaseId"
-                        )
+                        item.get("id")
                     ),
                     "headSha": (
                         item.get(
-                            "headSha"
+                            "head_sha"
                         )
+                        or head_sha
                     ),
-                    "event": (
-                        item.get(
-                            "event"
-                        )
+                    "app": (
+                        app_slug
                     ),
                 }
             )
@@ -354,12 +485,13 @@ class GitHubAdapter:
         pr: int,
     ) -> tuple[str, list[dict]]:
         # -------------------------------------------------
-        # Primary source
+        # Primary CI source
         # -------------------------------------------------
         #
-        # Prefer gh pr checks because it directly reports
-        # checks associated with the pull request.
-        r = self._run(
+        # gh pr checks is still preferred because
+        # it is PR-specific and can include checks
+        # from providers other than GitHub Actions.
+        primary_result = self._run(
             [
                 "gh",
                 "pr",
@@ -371,38 +503,55 @@ class GitHubAdapter:
             worktree,
         )
 
-        primary = self._json_list(
-            r.stdout
+        primary = (
+            self._parse_json_list(
+                primary_result.stdout,
+                "gh pr checks",
+            )
         )
 
         if primary:
             return (
                 self._state_from_check_records(
                     primary,
-                    r.returncode,
+                    primary_result.returncode,
                 ),
                 primary,
             )
 
         # -------------------------------------------------
-        # GitHub Actions fallback
+        # Direct GitHub Checks API fallback
         # -------------------------------------------------
         #
-        # Some GitHub App/API combinations can return an
-        # empty gh pr checks result even while an Actions
-        # workflow exists for the PR.
+        # Resolve the exact PR head SHA and ask the
+        # GitHub Checks REST API directly.
         #
-        # Resolve the exact PR head SHA and query Actions
-        # runs for that commit instead.
+        # Unlike the previous fallback, an API error
+        # is NOT converted silently into an empty list.
         head_sha = self._pr_head_sha(
             worktree,
             pr,
         )
 
+        # Preserve existing no-check behavior for
+        # a successful-but-empty gh response.
+        #
+        # This also keeps the existing adapter unit
+        # test compatible.
+        if not head_sha:
+            if (
+                primary_result.returncode
+                == 8
+            ):
+                return "pending", []
+
+            return "none", []
+
         fallback = (
-            self._workflow_runs_for_pr_head(
+            self._api_check_runs_for_ref(
                 worktree,
                 head_sha,
+                pr,
             )
         )
 
@@ -414,15 +563,85 @@ class GitHubAdapter:
                 fallback,
             )
 
-        # If gh itself explicitly reports pending but
-        # neither source has visible records yet, preserve
-        # that pending state.
-        if r.returncode == 8:
+        # gh pr checks explicitly indicates pending
+        # using return code 8.
+        if (
+            primary_result.returncode
+            == 8
+        ):
             return "pending", []
 
-        # No discoverable CI evidence must never be treated
-        # as green.
+        # Neither source produced CI evidence.
         return "none", []
+
+    def _api_workflow_runs_for_head(
+        self,
+        worktree: Path,
+        head_sha: str,
+        event: str = "pull_request",
+        per_page: int = 100,
+    ) -> list[dict]:
+        r = self._run(
+            [
+                "gh",
+                "api",
+                "--method",
+                "GET",
+                (
+                    "repos/{owner}/{repo}"
+                    "/actions/runs"
+                ),
+                "-H",
+                "Accept: application/vnd.github+json",
+                "-H",
+                "X-GitHub-Api-Version: 2026-03-10",
+                "-f",
+                f"head_sha={head_sha}",
+                "-f",
+                f"event={event}",
+                "-f",
+                f"per_page={per_page}",
+            ],
+            worktree,
+        )
+
+        if not r.ok:
+            raise self._command_error(
+                (
+                    "GitHub Actions API query "
+                    "failed for commit "
+                    f"{head_sha}"
+                ),
+                r,
+            )
+
+        payload = self._parse_json_object(
+            r.stdout,
+            "GitHub Actions API",
+        )
+
+        runs = payload.get(
+            "workflow_runs",
+            [],
+        )
+
+        if not isinstance(
+            runs,
+            list,
+        ):
+            raise RuntimeError(
+                "GitHub Actions API response has "
+                "invalid workflow_runs data."
+            )
+
+        return [
+            item
+            for item in runs
+            if isinstance(
+                item,
+                dict,
+            )
+        ]
 
     def failed_run_logs(
         self,
@@ -431,48 +650,70 @@ class GitHubAdapter:
         head_sha: str,
         max_runs: int = 3,
     ) -> str:
-        # Prefer pull-request-triggered failures so a
-        # separate push workflow for the same commit does
-        # not accidentally provide unrelated logs.
-        r = self._run(
-            [
-                "gh",
-                "run",
-                "list",
-                "--branch",
-                branch,
-                "--commit",
-                head_sha,
-                "--event",
-                "pull_request",
-                "--status",
+        # branch remains in the method signature
+        # for compatibility with Orchestrator.
+        _ = branch
+
+        # Discover workflow runs directly through
+        # the GitHub Actions REST API.
+        #
+        # GitHub supports filtering repository
+        # workflow runs by both head SHA and event.
+        try:
+            runs = (
+                self._api_workflow_runs_for_head(
+                    worktree,
+                    head_sha,
+                    event="pull_request",
+                )
+            )
+        except RuntimeError as exc:
+            # Do not silently hide log-discovery
+            # errors. Send the diagnostic into the
+            # CI repair context instead.
+            return (
+                "Unable to retrieve GitHub Actions "
+                f"run metadata: {exc}"
+            )
+
+        failed_runs = [
+            item
+            for item in runs
+            if str(
+                item.get(
+                    "conclusion"
+                )
+                or ""
+            ).lower()
+            in {
                 "failure",
-                "--json",
-                (
-                    "databaseId,headSha,"
-                    "workflowName,conclusion"
-                ),
-                "--limit",
-                str(max_runs),
-            ],
-            worktree,
-        )
+                "cancelled",
+                "timed_out",
+                "action_required",
+                "stale",
+                "startup_failure",
+            }
+        ]
 
-        if (
-            not r.ok
-            or not r.stdout.strip()
-        ):
-            return ""
-
-        runs = self._json_list(
-            r.stdout
+        # Explicit sorting keeps behavior stable
+        # if the REST API ordering changes.
+        failed_runs.sort(
+            key=lambda item: str(
+                item.get(
+                    "created_at"
+                )
+                or ""
+            ),
+            reverse=True,
         )
 
         chunks: list[str] = []
 
-        for item in runs[:max_runs]:
+        for item in (
+            failed_runs[:max_runs]
+        ):
             run_id = item.get(
-                "databaseId"
+                "id"
             )
 
             if not run_id:
@@ -489,12 +730,40 @@ class GitHubAdapter:
                 worktree,
             )
 
+            workflow_name = (
+                item.get("name")
+                or (
+                    "workflow-run-"
+                    f"{run_id}"
+                )
+            )
+
             if logs.stdout.strip():
                 chunks.append(
-                    "Workflow: "
-                    f"{item.get('workflowName') or run_id}"
-                    "\n"
-                    f"{logs.stdout}"
+                    (
+                        f"Workflow: "
+                        f"{workflow_name}\n"
+                        f"{logs.stdout}"
+                    )
+                )
+
+            elif not logs.ok:
+                detail = (
+                    logs.stderr
+                    or (
+                        "no failed-step "
+                        "logs returned"
+                    )
+                ).strip()
+
+                chunks.append(
+                    (
+                        f"Workflow: "
+                        f"{workflow_name}\n"
+                        "Unable to retrieve "
+                        "failed-step logs: "
+                        f"{detail}"
+                    )
                 )
 
         return "\n\n".join(
@@ -524,12 +793,19 @@ class GitHubAdapter:
         )
 
         if not r.ok:
-            raise RuntimeError(
-                r.stderr
+            raise self._command_error(
+                (
+                    "Failed to read state "
+                    f"for PR #{pr}"
+                ),
+                r,
             )
 
-        return json.loads(
-            r.stdout
+        return (
+            self._parse_json_object(
+                r.stdout,
+                "gh pr view",
+            )
         )
 
     def merge(
@@ -563,6 +839,7 @@ class GitHubAdapter:
         )
 
         if not r.ok:
-            raise RuntimeError(
-                r.stderr
+            raise self._command_error(
+                f"Failed to merge PR #{pr}",
+                r,
             )
