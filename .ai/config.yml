@@ -1,0 +1,12 @@
+main_branch: main
+agent: claude
+
+git:
+  auto_merge: true
+  merge_method: squash
+
+quality:
+  commands: {}
+
+security:
+  commands: {}
