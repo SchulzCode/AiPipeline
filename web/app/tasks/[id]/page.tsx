@@ -6,6 +6,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API, api } from "@/lib/api";
 import { agentLabel } from "@/lib/format";
 import type { ActivityFeed, ActivityItem, ActivityStatus, Event, Project, Task } from "@/lib/types";
+import { DiscoveryPanel } from "@/components/discovery-panel";
 import { StatusBadge } from "@/components/status-badge";
 import { TaskTimer } from "@/components/task-timer";
 
@@ -129,29 +130,33 @@ export default function TaskPage() {
         </section>
       )}
 
-      {/* 3. Progress / lifecycle stages */}
-      <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
-        <h2 className="font-semibold">Pipeline</h2>
-        <div className="mt-5 grid gap-2 md:grid-cols-4 xl:grid-cols-6">
-          {stages.map((stage, index) => {
-            const done = task.status === "DONE" || index < currentIndex;
-            const active = index === currentIndex && !done;
-            const stoppedHere = active && stoppedEarly;
-            const stoppedWarn = stoppedHere && task.status === "NEEDS_INPUT";
-            const tone = done
-              ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
-              : stoppedWarn
-                ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
-                : stoppedHere
-                  ? "border-rose-500/30 bg-rose-500/10 text-rose-300"
-                  : active
-                    ? "border-blue-400/40 bg-blue-400/10 text-blue-200"
-                    : "border-white/10 text-zinc-600";
-            const marker = done ? "✓ " : stoppedHere ? "✕ " : active ? "● " : "○ ";
-            return <div key={stage} className={`rounded-xl border p-3 text-xs font-semibold ${tone}`}>{marker}{stage}</div>;
-          })}
-        </div>
-      </section>
+      {/* 3. Progress / lifecycle stages, or the discovery-specific panel */}
+      {task.source === "discovery" ? (
+        <DiscoveryPanel taskId={task.id} />
+      ) : (
+        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+          <h2 className="font-semibold">Pipeline</h2>
+          <div className="mt-5 grid gap-2 md:grid-cols-4 xl:grid-cols-6">
+            {stages.map((stage, index) => {
+              const done = task.status === "DONE" || index < currentIndex;
+              const active = index === currentIndex && !done;
+              const stoppedHere = active && stoppedEarly;
+              const stoppedWarn = stoppedHere && task.status === "NEEDS_INPUT";
+              const tone = done
+                ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
+                : stoppedWarn
+                  ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
+                  : stoppedHere
+                    ? "border-rose-500/30 bg-rose-500/10 text-rose-300"
+                    : active
+                      ? "border-blue-400/40 bg-blue-400/10 text-blue-200"
+                      : "border-white/10 text-zinc-600";
+              const marker = done ? "✓ " : stoppedHere ? "✕ " : active ? "● " : "○ ";
+              return <div key={stage} className={`rounded-xl border p-3 text-xs font-semibold ${tone}`}>{marker}{stage}</div>;
+            })}
+          </div>
+        </section>
+      )}
 
       {/* 3b. Planner output */}
       {activity?.checks.plan && (

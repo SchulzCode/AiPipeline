@@ -30,6 +30,12 @@ class PipelineConfig:
     setup_auto: bool = True
     quality_commands: dict[str, str] = field(default_factory=dict)
     security_commands: dict[str, str] = field(default_factory=dict)
+    discovery_max_candidates: int = 5
+    discovery_max_new_issues: int = 5
+    discovery_max_auto_implement: int = 0
+    discovery_max_risk: str = "MEDIUM"
+    discovery_max_context_class: str = "NORMAL"
+    discovery_attempts: int = 2
     codex: dict[str, Any] = field(default_factory=dict)
     claude: dict[str, Any] = field(default_factory=dict)
 
@@ -65,6 +71,7 @@ def load_config(repo: Path | None = None) -> PipelineConfig:
     security = merged.get("security", {})
     git = merged.get("git", {})
     planning = merged.get("planning", {})
+    discovery = merged.get("discovery", {})
     return PipelineConfig(
         main_branch=merged.get("main_branch", "main"),
         agent=merged.get("agent", "codex"),
@@ -88,6 +95,12 @@ def load_config(repo: Path | None = None) -> PipelineConfig:
         setup_auto=bool(setup.get("auto", True)),
         quality_commands=dict(quality.get("commands", {})),
         security_commands=dict(security.get("commands", {})),
+        discovery_max_candidates=int(discovery.get("max_candidates", 5)),
+        discovery_max_new_issues=int(discovery.get("max_new_issues", 5)),
+        discovery_max_auto_implement=int(discovery.get("max_auto_implement", 0)),
+        discovery_max_risk=str(discovery.get("max_risk", "MEDIUM")).upper(),
+        discovery_max_context_class=str(discovery.get("max_context_class", "NORMAL")).upper(),
+        discovery_attempts=int(discovery.get("attempts", 2)),
         codex=dict(merged.get("codex", {})),
         claude=dict(merged.get("claude", {})),
     )

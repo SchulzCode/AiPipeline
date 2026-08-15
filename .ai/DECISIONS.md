@@ -79,3 +79,49 @@ risk gates in `_semantic_gates_after_change`. Blocking (rather than
 skipping) on exhausted Planner retries matches how every other gate in the
 pipeline treats a bounded-retry failure, so a silently-skipped Planner never
 masks a broken agent/CLI as normal operation.
+
+## D-004 Feature discovery: deterministic ranking/dedup, handoff is an ordinary queued task, never a direct implementation
+Tags: backend, orchestrator, discovery, github, control-plane
+Status: active
+Severity: medium
+
+Decision:
+The feature-discovery workflow (`discovery.py`, `Orchestrator.run_discovery`,
+issue #8) is implemented as a separate lifecycle
+(`TaskStatus.DISCOVERING → DONE/BLOCKED/FAILED`) from the normal `run()`
+state machine, not a new branch inside it, and `TaskStatus.DISCOVERING` is a
+new enum value distinct from the pre-existing no-op `TaskStatus.DISCOVERY`
+phase already used by `run()` — the latter is untouched. Three design
+choices matter for future maintainers:
+
+1. Candidate scoring, ranking, and duplicate detection are plain
+   deterministic Python (`discovery.score_candidate`/`rank_candidates`/
+   `detect_duplicates`), not a second LLM call. Only one LLM role runs per
+   discovery task (`DISCOVERY_AGENT`, read-only via
+   `agents.base.READ_ONLY_ROLES`), and its sole job is proposing candidates,
+   never scoring, ranking, deduplicating, or implementing them.
+2. Duplicate detection matches first on an exact
+   `<!-- aipipe-discovery:{key} -->` marker embedded in the issue body
+   (idempotency across repeated discovery runs), then falls back to
+   `difflib.SequenceMatcher` title/body similarity — no network/LLM call is
+   needed to decide "have we already proposed this."
+3. Handoff (`discovery.max_auto_implement`, default `0`) never calls
+   `Orchestrator.run()` on itself. At the core layer, `run_discovery` only
+   *selects* eligible issue numbers (bounded by
+   `max_auto_implement`/`max_risk`/`max_context_class`) and returns them; at
+   the control-plane layer, `TaskExecutor.execute()` turns each into an
+   ordinary `QUEUED` `github_issue` `ControlTask` (linked back via
+   `discovery_task_id`) for a worker to claim later through the existing
+   claim/heartbeat loop.
+
+Reason:
+Keeping ranking/dedup/scoring deterministic keeps discovery bounded,
+inspectable, and unit-testable without mocking an agent CLI, and avoids a
+second unbounded LLM cost per run. Marker-based idempotency means a retried
+or re-run discovery task can never double-file the same issue. Routing
+handoff through the ordinary task queue (rather than an in-process call into
+`run()`) means a discovered feature is subject to every existing
+quality/security/review/CI/merge gate exactly like a human-filed issue would
+be — discovery can propose and queue work, but can never implement it or
+bypass how it gets implemented. `max_auto_implement` defaulting to `0` means
+a project must opt in before anything is auto-implemented at all.

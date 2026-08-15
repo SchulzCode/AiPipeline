@@ -1,4 +1,4 @@
-import type { ActivityFeed, AgentModels, Event, Installation, Issue, Project, Repository, Task, User } from "./types";
+import type { ActivityFeed, AgentModels, DiscoverySummary, Event, Installation, Issue, Project, Repository, Task, User } from "./types";
 
 export const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 
@@ -32,4 +32,7 @@ export const api = {
   issues: (projectId: string) => request<Issue[]>(`/projects/${projectId}/issues`),
   createTask: (projectId: string, prompt: string) => request<Task>(`/projects/${projectId}/tasks`, { method: "POST", body: JSON.stringify({ prompt }) }),
   createIssueTask: (projectId: string, issue_number: number) => request<Task>(`/projects/${projectId}/issue-tasks`, { method: "POST", body: JSON.stringify({ issue_number }) }),
+  createDiscoveryTask: (projectId: string, prompt?: string) => request<Task>(`/projects/${projectId}/discovery-tasks`, { method: "POST", body: JSON.stringify({ prompt: prompt || null }) }),
+  discovery: (taskId: string) => request<DiscoverySummary>(`/tasks/${taskId}/discovery`),
+  handoffTasks: (taskId: string) => request<Task[]>(`/tasks/${taskId}/handoff-tasks`),
 };

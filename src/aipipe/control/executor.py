@@ -121,6 +121,9 @@ class TaskExecutor:
 
             if source == "github_issue":
                 core_id, labels = orch.enqueue_issue_task(int(source_ref or "0"))
+            elif source == "discovery":
+                core_id = orch.enqueue_discovery_task(prompt)
+                labels = None
             else:
                 core_id = orch.enqueue_prompt_task(prompt)
                 labels = None
@@ -137,7 +140,34 @@ class TaskExecutor:
                 task.core_task_id = core_id
                 add_event(db, control_task_id, "CORE_TASK_CREATED", core_id)
 
-            orch.run(core_id, labels=labels)
+            if source == "discovery":
+                # Handoff never runs synchronously here: eligible candidates are
+                # enqueued as ordinary QUEUED github_issue ControlTasks for a
+                # worker to claim later, so discovery can never bypass the
+                # normal Issue -> Task -> PR -> CI -> Merge gates itself.
+                result = orch.run_discovery(core_id)
+                if result.handoff_issue_numbers:
+                    with self.database.session() as db:
+                        for issue_number in result.handoff_issue_numbers:
+                            handoff = ControlTask(
+                                project_id=project_id,
+                                source="github_issue",
+                                source_reference=str(issue_number),
+                                title=f"GitHub Issue #{issue_number}",
+                                prompt=f"Implement GitHub Issue #{issue_number}",
+                                discovery_task_id=control_task_id,
+                            )
+                            db.add(handoff)
+                            db.flush()
+                            add_event(
+                                db,
+                                handoff.id,
+                                "QUEUED",
+                                f"Auto-handoff from discovery task {control_task_id}",
+                            )
+                            add_event(db, control_task_id, "DISCOVERY_HANDOFF_CREATED", handoff.id)
+            else:
+                orch.run(core_id, labels=labels)
 
         except PipelineBlocked as exc:
             with self.database.session() as db:

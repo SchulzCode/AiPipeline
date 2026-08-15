@@ -69,6 +69,10 @@ class IssueTaskCreate(BaseModel):
     issue_number: int = Field(gt=0)
 
 
+class DiscoveryTaskCreate(BaseModel):
+    prompt: str | None = Field(default=None, max_length=50000)
+
+
 class TaskOut(ORMModel):
     id: str
     project_id: str
@@ -80,6 +84,7 @@ class TaskOut(ORMModel):
     risk: str | None
     context_class: str | None
     core_task_id: str | None
+    discovery_task_id: str | None = None
     branch: str | None
     pr_number: int | None
     error: str | None
@@ -166,3 +171,33 @@ class ActivityFeedOut(BaseModel):
     current: CurrentActivityOut | None = None
     blocker: BlockerOut | None = None
     checks: ChecksSummaryOut
+
+
+class FeatureCandidateOut(BaseModel):
+    key: str
+    title: str
+    summary: str
+    rationale: str = ""
+    acceptance_criteria: list[str] = []
+    task_type: str
+    risk: str
+    context_class: str
+    labels: list[str] = []
+    score: float
+    rank: int | None = None
+    status: str
+    duplicate_of: str | None = None
+    issue_number: int | None = None
+    issue_url: str | None = None
+    error: str | None = None
+    handoff: bool = False
+
+
+class DiscoverySummaryOut(BaseModel):
+    status: str
+    candidates: list[FeatureCandidateOut] = []
+    created: list[str] = []
+    duplicates: list[str] = []
+    failed: list[str] = []
+    handoff_issue_numbers: list[int] = []
+    updated_at: datetime | None = None

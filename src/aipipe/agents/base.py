@@ -11,7 +11,7 @@ from ..util import CommandResult, truncate
 # select read-only tool/sandbox flags; the orchestrator additionally enforces
 # it with a diff-hash tripwire (see Orchestrator._invoke_review/_run_planner)
 # so the contract holds even if a CLI's sandboxing has a gap.
-READ_ONLY_ROLES = frozenset({"REVIEWER", "SECURITY_REVIEWER", "ROUTER", "PLANNER"})
+READ_ONLY_ROLES = frozenset({"REVIEWER", "SECURITY_REVIEWER", "ROUTER", "PLANNER", "DISCOVERY_AGENT"})
 
 
 @dataclass

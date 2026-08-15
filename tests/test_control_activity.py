@@ -252,3 +252,72 @@ def test_non_phase_items_have_no_duration_by_default():
     review_item = next(i for i in feed["items"] if i["title"] == "Reviewing implementation")
     assert quality_item["duration_seconds"] is None
     assert review_item["duration_seconds"] is None
+
+
+def test_discovering_status_does_not_imply_progression_to_planning():
+    # DISCOVERING is a distinct workflow from run()'s PHASE_ORDER, so it must
+    # never suggest the task will proceed to PLANNING like DISCOVERY does.
+    assert next_phase_label("DISCOVERING") is None
+
+
+def test_discovering_phase_renders_readably_without_a_misleading_next_step():
+    events = [_event(1, "core:status", {"status": "DISCOVERING"}, _ts(0))]
+    feed = build_activity_feed(_task("DISCOVERING"), events, "Codex")
+
+    assert feed["items"][0]["title"] == "Discovering features"
+    assert feed["items"][0]["next_step"] is None
+    assert feed["current"]["title"] == "Discovering features"
+    assert feed["current"]["next_step"] is None
+
+
+def test_discovery_agent_run_event_is_summarized_not_raw():
+    events = [
+        _event(1, "core:status", {"status": "DISCOVERING"}, _ts(0)),
+        _event(2, "core:event", {"event": "DISCOVERY_AGENT_RUN", "detail": "attempt=1 rc=0\nsome raw output"}, _ts(1)),
+    ]
+    feed = build_activity_feed(_task("DISCOVERING"), events, "Codex")
+    item = next(i for i in feed["items"] if i["title"] == "Discovery attempt 1")
+    assert item["result"] == "Response received."
+    assert item["status"] == "success"
+    assert "raw output" not in item["summary"]
+
+
+def test_discovery_candidates_event_reports_count():
+    candidates_json = json.dumps([{"key": "a"}, {"key": "b"}])
+    events = [
+        _event(1, "core:status", {"status": "DISCOVERING"}, _ts(0)),
+        _event(2, "core:event", {"event": "DISCOVERY_CANDIDATES", "detail": candidates_json}, _ts(1)),
+    ]
+    feed = build_activity_feed(_task("DISCOVERING"), events, "Codex")
+    item = next(i for i in feed["items"] if i["title"] == "Feature candidates proposed")
+    assert item["result"] == "2 candidate(s) ranked."
+
+
+def test_discovery_issue_created_and_failed_events_are_summarized():
+    events = [
+        _event(1, "core:status", {"status": "DISCOVERING"}, _ts(0)),
+        _event(2, "core:event", {"event": "DISCOVERY_ISSUE_CREATED", "detail": json.dumps({"key": "a", "issue_number": 42})}, _ts(1)),
+        _event(3, "core:event", {"event": "DISCOVERY_ISSUE_FAILED", "detail": json.dumps({"key": "b", "title": "X", "error": "boom"})}, _ts(2)),
+    ]
+    feed = build_activity_feed(_task("DISCOVERING"), events, "Codex")
+
+    created_item = next(i for i in feed["items"] if i["title"] == "Issue filed")
+    assert created_item["result"] == "Issue #42 created."
+    assert created_item["status"] == "success"
+
+    failed_item = next(i for i in feed["items"] if i["title"] == "Issue creation failed")
+    assert failed_item["result"] == "boom"
+    assert failed_item["status"] == "warning"
+
+
+def test_discovery_summary_event_reports_totals_and_marks_task_done():
+    summary = {"created": ["a", "b"], "duplicates": ["c"], "failed": [], "handoff_issue_numbers": [1]}
+    events = [
+        _event(1, "core:status", {"status": "DISCOVERING"}, _ts(0)),
+        _event(2, "core:event", {"event": "DISCOVERY_SUMMARY", "detail": json.dumps(summary)}, _ts(1)),
+        _event(3, "core:status", {"status": "DONE"}, _ts(2)),
+    ]
+    feed = build_activity_feed(_task("DONE"), events, "Codex")
+    item = next(i for i in feed["items"] if i["title"] == "Discovery summary")
+    assert item["result"] == "2 issue(s) created, 1 duplicate(s) skipped, 0 failed, 1 handed off."
+    assert feed["blocker"] is None
