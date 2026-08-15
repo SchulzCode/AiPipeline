@@ -2,12 +2,10 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from pathlib import Path
 
-from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import ControlEvent, ControlTask, Project
+from .models import ControlEvent, ControlTask
 
 
 TERMINAL = {"DONE", "BLOCKED", "FAILED", "CANCELLED"}
@@ -35,11 +33,14 @@ def task_to_dict(task: ControlTask) -> dict:
         "branch": task.branch,
         "pr_number": task.pr_number,
         "error": task.error,
+        "failure_category": task.failure_category,
+        "worker_build": task.worker_build,
     }
 
 
 def apply_core_observation(database, control_task_id: str):
     """Return a callback that mirrors core pipeline state into the control database."""
+
     def observer(kind: str, payload: dict) -> None:
         with database.session() as db:
             task = db.get(ControlTask, control_task_id)
@@ -52,6 +53,10 @@ def apply_core_observation(database, control_task_id: str):
                     task.completed_at = datetime.now(timezone.utc)
                 if status in {"BLOCKED", "FAILED"}:
                     task.error = payload.get("detail")
+                    task.failure_category = payload.get("failure_category")
+                elif status == "DONE":
+                    task.error = None
+                    task.failure_category = None
             elif kind == "usage":
                 task.input_tokens += int(payload.get("input_tokens", 0) or 0)
                 task.output_tokens += int(payload.get("output_tokens", 0) or 0)
@@ -65,6 +70,9 @@ def apply_core_observation(database, control_task_id: str):
                     task.branch = fields["branch"]
                 if fields.get("pr_number") is not None:
                     task.pr_number = int(fields["pr_number"])
+                if "failure_category" in fields:
+                    task.failure_category = fields.get("failure_category")
             detail = json.dumps(payload, ensure_ascii=False, default=str)
             add_event(db, control_task_id, f"core:{kind}", detail[:16000])
+
     return observer
