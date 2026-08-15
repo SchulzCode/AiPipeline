@@ -118,6 +118,72 @@ class GitHubAdapter:
             raise self._command_error("Failed to read GitHub issue", r)
         return self._parse_json_object(r.stdout, "gh issue view")
 
+    def list_issues(self, state: str = "all", limit: int = 100) -> list[dict]:
+        result = self._run_read(
+            [
+                "gh", "issue", "list",
+                "--state", state,
+                "--limit", str(limit),
+                "--json", "number,title,body,state,labels,url",
+            ],
+            self.repo,
+        )
+        if not result.ok:
+            raise self._command_error("Failed to list GitHub issues", result)
+        return self._parse_json_list(result.stdout, "gh issue list")
+
+    def list_recent_prs(self, state: str = "all", limit: int = 100) -> list[dict]:
+        result = self._run_read(
+            [
+                "gh", "pr", "list",
+                "--state", state,
+                "--limit", str(limit),
+                "--json", "number,title,body,state,url",
+            ],
+            self.repo,
+        )
+        if not result.ok:
+            raise self._command_error("Failed to list GitHub pull requests", result)
+        return self._parse_json_list(result.stdout, "gh pr list")
+
+    def _find_issue_by_marker(self, marker: str) -> dict | None:
+        for issue in self.list_issues(state="all", limit=200):
+            if marker in str(issue.get("body") or ""):
+                return issue
+        return None
+
+    def create_issue(self, title: str, body: str, labels: list[str], marker: str) -> dict:
+        """Create a GitHub issue, idempotent on the discovery marker embedded in ``body``.
+
+        Reconciles against an existing issue containing ``marker`` both before
+        creating (avoids duplicate filings across discovery runs) and after a
+        failed creation call (the create may have succeeded remotely while the
+        response was lost), matching the reconciliation pattern already used
+        by ``create_pr``.
+        """
+
+        existing = self._find_issue_by_marker(marker)
+        if existing is not None:
+            return existing
+
+        cmd = ["gh", "issue", "create", "--title", title, "--body", body]
+        for label in labels:
+            cmd += ["--label", label]
+        result = self._run(cmd, self.repo)
+
+        if not result.ok:
+            existing = self._find_issue_by_marker(marker)
+            if existing is not None:
+                return existing
+            raise self._command_error("Failed to create GitHub issue", result)
+
+        existing = self._find_issue_by_marker(marker)
+        if existing is None:
+            raise RuntimeError(
+                "GitHub reported issue creation success but no matching issue can be resolved."
+            )
+        return existing
+
     def _current_branch(self, worktree: Path) -> str:
         result = run(["git", "branch", "--show-current"], worktree, self.timeout)
         if not result.ok or not result.stdout.strip():

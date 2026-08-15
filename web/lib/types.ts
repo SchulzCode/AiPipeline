@@ -26,6 +26,7 @@ export type Task = {
   risk?: string | null;
   context_class?: string | null;
   core_task_id?: string | null;
+  discovery_task_id?: string | null;
   branch?: string | null;
   pr_number?: number | null;
   error?: string | null;
@@ -86,3 +87,33 @@ export type ActivityFeed = {
 
 export type Installation = { id: number; account: string; target_type?: string | null };
 export type Repository = { id: number; name: string; full_name: string; private: boolean; default_branch: string };
+
+export type FeatureCandidate = {
+  key: string;
+  title: string;
+  summary: string;
+  rationale?: string;
+  acceptance_criteria: string[];
+  task_type: string;
+  risk: string;
+  context_class: string;
+  labels: string[];
+  score: number;
+  rank?: number | null;
+  status: "proposed" | "duplicate" | "created" | "failed";
+  duplicate_of?: string | null;
+  issue_number?: number | null;
+  issue_url?: string | null;
+  error?: string | null;
+  handoff: boolean;
+};
+
+export type DiscoverySummary = {
+  status: "pending" | "ready";
+  candidates: FeatureCandidate[];
+  created: string[];
+  duplicates: string[];
+  failed: string[];
+  handoff_issue_numbers: number[];
+  updated_at?: string | null;
+};

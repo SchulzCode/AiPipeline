@@ -16,7 +16,9 @@ Views in v1.0:
 - add project;
 - project detail + prompt input;
 - open GitHub issues + run action;
+- feature discovery launch action (when the project has a GitHub repository);
 - task detail / pipeline timeline / token count;
+- discovery task detail: ranked candidates, duplicates, created issues, and handoff task status (in place of the pipeline timeline);
 - non-secret runtime settings.
 
 ### Control API (`src/aipipe/control/app.py`)
@@ -50,6 +52,52 @@ BLOCKED / FAILED / CANCELLED / NEEDS_INPUT
 
 The core emits observations into the control database; the API exposes them over SSE.
 
+### Feature-discovery workflow (`src/aipipe/discovery.py`, `Orchestrator.run_discovery`)
+
+A separate, bounded workflow — not a phase of the state machine above — driven by
+`Orchestrator.run_discovery()` through its own `DISCOVERING → DONE/BLOCKED/FAILED`
+lifecycle (`TaskStatus.DISCOVERING`, a distinct value from the pre-existing
+no-op `DISCOVERY` phase in `run()`). It:
+
+1. runs a single read-only `DISCOVERY_AGENT` role (sandboxed via
+   `agents.base.READ_ONLY_ROLES`, enforced with the same diff-hash tripwire as
+   PLANNER/REVIEWER) that explores the repository and returns a
+   `{"candidates":[...]}` JSON envelope — never a code change;
+2. normalizes, scores and ranks candidates deterministically in
+   `discovery.py` (no LLM call for scoring/ranking/dedup — see D-004);
+3. deduplicates against existing GitHub issues/PRs, first by an exact
+   `<!-- aipipe-discovery:{key} -->` marker match, then by title/body
+   similarity (`difflib.SequenceMatcher`);
+4. files the remaining candidates (bounded by `discovery.max_new_issues`) as
+   structured, implementation-ready GitHub issues via
+   `GitHubAdapter.create_issue` (idempotent on the marker, so a retried or
+   re-run discovery task never double-files an issue);
+5. computes an optional, bounded handoff selection (bounded by
+   `discovery.max_auto_implement`, filtered by `discovery.max_risk` /
+   `discovery.max_context_class`) and returns the eligible GitHub issue
+   numbers — it never implements anything itself or calls `run()`/enters the
+   normal pipeline directly.
+
+`discovery.max_auto_implement` defaults to `0`, so by default discovery only
+proposes and files issues; nothing is auto-implemented until a project
+explicitly raises the limit. A generated `DISCOVERY_CANDIDATES` event is
+recorded before any GitHub call, so a partial GitHub failure (a duplicate
+lookup or one failed `create_issue` among several) never loses the generated
+proposals — the task is recoverable from that event, and remaining
+candidates are still processed. The workflow never commits, pushes, opens a
+PR, or merges, so it can always finish successfully (`DONE`) without
+modifying repository code, and there is no discovery-triggers-discovery loop
+or scheduler.
+
+At the control-plane layer, a discovery `ControlTask` (`source="discovery"`)
+never calls `Orchestrator.run()` for its handoff candidates; instead
+`TaskExecutor.execute()` enqueues each eligible issue as an ordinary
+`QUEUED` `github_issue` `ControlTask` (linked back via `discovery_task_id`)
+for a worker to claim later through the normal claim/heartbeat loop. This
+keeps handoff subject to every existing quality/security/review/CI/merge
+gate — discovery can propose and queue work, never bypass how it gets
+implemented.
+
 ### Agent adapters
 
 `CodexAdapter` and `ClaudeAdapter` implement the same logical role interface. Agent selection is per project and can be overridden by CLI. Each adapter also exposes its own `MODELS` list (a Default/Automatic option plus the concrete models it supports); a project may pin one of those, stored alongside its agent choice and forwarded to the adapter's `model` config key. Leaving it unset preserves the adapter's own default behavior.
@@ -60,6 +108,7 @@ Roles used by v1.0:
 - IMPLEMENTER
 - REVIEWER (MEDIUM/HIGH)
 - SECURITY_REVIEWER (HIGH)
+- DISCOVERY_AGENT (read-only; runs only inside the feature-discovery workflow, never during a normal task)
 
 Routing is deterministic to avoid a dedicated LLM call. Durable project knowledge is updated by the implementer only when relevant, so there is no always-on knowledge-agent run.
 

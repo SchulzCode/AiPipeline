@@ -22,6 +22,10 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("prompt")
     i = sub.add_parser("issue", help="Implement a GitHub issue by number")
     i.add_argument("number", type=int)
+    sub.add_parser(
+        "discover",
+        help="Run the read-only feature-discovery workflow and file ranked candidates as GitHub issues",
+    )
     s = sub.add_parser("status", help="Show pipeline task state")
     s.add_argument("task_id", nargs="?")
     sub.add_parser("init", help="Initialize global and project AIpipe knowledge/config")
@@ -131,9 +135,14 @@ def main(argv: list[str] | None = None) -> int:
         orch = Orchestrator(repo, args.agent)
         if args.command == "task":
             task_id = orch.create_prompt_task(args.prompt)
-        else:
+            print(f"{task_id}: DONE")
+        elif args.command == "issue":
             task_id = orch.create_issue_task(args.number)
-        print(f"{task_id}: DONE")
+            print(f"{task_id}: DONE")
+        else:
+            task_id = orch.enqueue_discovery_task()
+            result = orch.run_discovery(task_id)
+            print(json.dumps({"task_id": task_id, "status": "DONE", **result.to_dict()}, indent=2))
         return 0
     except PipelineBlocked as exc:
         print(f"BLOCKED [{exc.category.value}]: {exc}", file=sys.stderr)

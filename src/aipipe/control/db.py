@@ -27,6 +27,7 @@ _COLUMN_MIGRATIONS: tuple[tuple[str, str, str], ...] = (
     ("control_projects", "model", "VARCHAR(64)"),
     ("control_tasks", "failure_category", "VARCHAR(64)"),
     ("control_tasks", "worker_build", "VARCHAR(128)"),
+    ("control_tasks", "discovery_task_id", "VARCHAR(36)"),
 )
 
 

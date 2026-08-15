@@ -52,6 +52,14 @@ planning:
   enabled: true
   context_classes: [DEEP]
 
+discovery:
+  max_candidates: 5
+  max_new_issues: 5
+  max_auto_implement: 0
+  max_risk: MEDIUM
+  max_context_class: NORMAL
+  attempts: 2
+
 codex:
   binary: codex
   ignore_user_config: true
@@ -67,3 +75,5 @@ claude:
 Explicit project quality/security commands are preferred for production repositories. Autodetection is a fallback.
 
 `planning.context_classes` lists which routed `context_class` values (`SMALL`/`NORMAL`/`DEEP`) trigger a read-only Planner stage before implementation; `planning.enabled: false` disables it entirely regardless of context class. `retries.planner` bounds Planner retries — exhausting the budget blocks the task rather than looping indefinitely.
+
+`discovery.max_candidates` bounds how many feature candidates a single discovery run proposes; `discovery.max_new_issues` (must be `<= max_candidates`) bounds how many of the non-duplicate candidates are actually filed as GitHub issues; `discovery.max_auto_implement` (must be `<= max_new_issues`, **default `0`**) bounds how many of the created issues are eligible for automatic handoff into the normal Issue → Task → PR → CI → Merge pipeline — the default of `0` means discovery only proposes and files issues, and nothing is auto-implemented until a project explicitly raises this limit. `discovery.max_risk` (`LOW`/`MEDIUM`/`HIGH`) and `discovery.max_context_class` (`SMALL`/`NORMAL`/`DEEP`) further restrict which created issues are handoff-eligible. `discovery.attempts` bounds retries of the read-only discovery agent itself (not GitHub calls, which use the existing `retries.external` budget).

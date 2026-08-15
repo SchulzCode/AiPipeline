@@ -9,12 +9,22 @@ from pathlib import Path
 from .agents import agent_models, build_agent
 from .config import home_dir, load_config
 from .context import ContextBuilder
+from .discovery import (
+    DISCOVERY_MARKER,
+    DiscoveryResult,
+    build_candidates,
+    detect_duplicates,
+    issue_body,
+    parse_candidates,
+    rank_candidates,
+    within_bounds,
+)
 from .git_manager import GitManager
 from .github import GitHubAdapter
 from .knowledge import init_project_knowledge
 from .merge_policy import MergeEvidence, merge_allowed
-from .models import ContextClass, FailureCategory, Risk, TaskContract, TaskStatus
-from .prompts import IMPLEMENTER_SUFFIX, PLANNER_SUFFIX, REVIEWER_SUFFIX, SECURITY_SUFFIX
+from .models import ContextClass, FailureCategory, Risk, Route, TaskContract, TaskStatus, TaskType
+from .prompts import DISCOVERY_SUFFIX, IMPLEMENTER_SUFFIX, PLANNER_SUFFIX, REVIEWER_SUFFIX, SECURITY_SUFFIX
 from .quality import QualityEngine
 from .reliability import ReviewVerdict, looks_transient, parse_review_verdict
 from .router import acceptance_from_text, planner_required, route_task
@@ -129,6 +139,22 @@ class Orchestrator:
         self.run(public_id, labels=labels)
         return public_id
 
+    def enqueue_discovery_task(
+        self,
+        prompt: str = "Discover valuable, implementation-ready feature candidates for this repository.",
+    ) -> str:
+        task = self.state.create_task(
+            self._project(),
+            "discovery",
+            prompt,
+            title="Feature discovery",
+        )
+        return task["public_id"]
+
+    def create_discovery_task(self) -> DiscoveryResult:
+        public_id = self.enqueue_discovery_task()
+        return self.run_discovery(public_id)
+
     def _record_checks(self, task_db_id: int, kind: str, results) -> bool:
         all_ok = True
         for name, result in results:
@@ -168,11 +194,15 @@ class Orchestrator:
             "ci_timeout_seconds": self.config.ci_timeout_seconds,
             "ci_registration_grace_seconds": self.config.ci_registration_grace_seconds,
             "planner_attempts": self.config.planner_attempts,
+            "discovery_attempts": self.config.discovery_attempts,
         }
         for name, value in numeric.items():
             minimum = (
                 1
-                if name in {"implementation_attempts", "external_attempts", "ci_timeout_seconds", "planner_attempts"}
+                if name in {
+                    "implementation_attempts", "external_attempts", "ci_timeout_seconds",
+                    "planner_attempts", "discovery_attempts",
+                }
                 else 0
             )
             if value < minimum:
@@ -185,6 +215,33 @@ class Orchestrator:
         if invalid_classes:
             raise PipelineBlocked(
                 f"Invalid planning.context_classes entries: {sorted(invalid_classes)}.",
+                FailureCategory.CONFIGURATION,
+            )
+        if self.config.discovery_max_candidates < 1:
+            raise PipelineBlocked(
+                f"Invalid configuration: discovery.max_candidates={self.config.discovery_max_candidates} (minimum 1).",
+                FailureCategory.CONFIGURATION,
+            )
+        if not (0 <= self.config.discovery_max_new_issues <= self.config.discovery_max_candidates):
+            raise PipelineBlocked(
+                "Invalid configuration: discovery.max_new_issues must be between 0 and "
+                f"discovery.max_candidates ({self.config.discovery_max_candidates}).",
+                FailureCategory.CONFIGURATION,
+            )
+        if not (0 <= self.config.discovery_max_auto_implement <= self.config.discovery_max_new_issues):
+            raise PipelineBlocked(
+                "Invalid configuration: discovery.max_auto_implement must be between 0 and "
+                f"discovery.max_new_issues ({self.config.discovery_max_new_issues}).",
+                FailureCategory.CONFIGURATION,
+            )
+        if self.config.discovery_max_risk not in {r.value for r in Risk}:
+            raise PipelineBlocked(
+                f"Invalid discovery.max_risk: {self.config.discovery_max_risk!r}.",
+                FailureCategory.CONFIGURATION,
+            )
+        if self.config.discovery_max_context_class not in valid_context_classes:
+            raise PipelineBlocked(
+                f"Invalid discovery.max_context_class: {self.config.discovery_max_context_class!r}.",
                 FailureCategory.CONFIGURATION,
             )
         for group_name, commands in {
@@ -702,6 +759,204 @@ class Orchestrator:
             f"Planner did not produce a usable plan within the bounded retry budget. {truncate(last_output, 1500)}".strip(),
             FailureCategory.PLANNING_FAILURE,
         )
+
+    def _run_discovery_agent(
+        self,
+        task_db_id: int,
+        contract: TaskContract,
+        worktree: Path,
+        max_candidates: int,
+    ) -> list[dict]:
+        prompt = (
+            self.context.build(worktree, contract, "DISCOVERY_AGENT")
+            + "\n\n"
+            + DISCOVERY_SUFFIX
+            + f"\nPropose at most {max_candidates} candidates."
+        )
+        attempts = max(1, self.config.discovery_attempts)
+        last_output = ""
+
+        for attempt in range(1, attempts + 1):
+            before_hash = self._diff_hash(worktree)
+            result = self._agent_run(task_db_id, "DISCOVERY_AGENT", prompt, worktree, attempt)
+            if self._diff_hash(worktree) != before_hash:
+                raise PipelineBlocked(
+                    "DISCOVERY_AGENT modified repository state despite being a read-only stage.",
+                    FailureCategory.STATE_INCONSISTENCY,
+                )
+
+            last_output = result.output
+            self.state.event(
+                task_db_id,
+                "DISCOVERY_AGENT_RUN",
+                f"attempt={attempt} rc={result.returncode}\n{truncate(result.output, 7000)}",
+            )
+            if result.ok:
+                return parse_candidates(result.output)
+
+        raise PipelineBlocked(
+            f"Discovery agent did not produce a usable response within the bounded retry budget. {truncate(last_output, 1500)}".strip(),
+            FailureCategory.AGENT_PROTOCOL,
+        )
+
+    def run_discovery(self, public_id: str) -> DiscoveryResult:
+        """Run the bounded, read-only feature-discovery workflow.
+
+        Explores the repository, proposes ranked/deduplicated feature
+        candidates, and files the non-duplicate ones as structured GitHub
+        issues. Never commits, pushes, opens a PR, or implements a discovered
+        feature itself; a caller (CLI or the control-plane executor) decides
+        separately whether to enqueue any of the returned
+        ``handoff_issue_numbers`` into the normal Issue -> Task -> PR -> CI ->
+        Merge pipeline, so this method never invokes ``run`` on itself or
+        recurses into another discovery run.
+        """
+
+        task_row = self.state.task(public_id)
+        task_db_id = int(task_row["id"])
+        worktree: Path | None = None
+        branch: str | None = None
+
+        try:
+            self._preflight()
+            self.state.set_status(public_id, TaskStatus.DISCOVERING)
+
+            route = Route(TaskType.DISCOVERY, Risk.LOW, ContextClass.NORMAL, ["general"], [])
+            contract = TaskContract(
+                id=public_id,
+                goal=task_row["goal"],
+                source="discovery",
+                title=task_row.get("title"),
+                body=task_row.get("body"),
+                acceptance_criteria=[],
+                route=route,
+            )
+
+            try:
+                branch, worktree = self.git.prepare(public_id, task_row.get("title") or "discovery")
+            except Exception as exc:
+                raise PipelineBlocked(
+                    f"Workspace preparation failed: {exc}",
+                    FailureCategory.STATE_INCONSISTENCY,
+                ) from exc
+            self.git.assert_worktree(worktree, branch)
+
+            max_candidates = max(1, self.config.discovery_max_candidates)
+            raw_candidates = self._run_discovery_agent(task_db_id, contract, worktree, max_candidates)
+            candidates = build_candidates(raw_candidates, max_candidates)
+            candidates = rank_candidates(candidates)
+
+            # Proposals are persisted before any GitHub call so a downstream
+            # duplicate-lookup or issue-creation failure never loses generated
+            # candidates; the task remains recoverable from this event alone.
+            self.state.event(
+                task_db_id,
+                "DISCOVERY_CANDIDATES",
+                json.dumps([c.to_dict() for c in candidates], ensure_ascii=False)[:16000],
+            )
+
+            try:
+                existing_issues = self.github.list_issues(state="all", limit=200)
+                existing_prs = self.github.list_recent_prs(state="all", limit=100)
+            except Exception as exc:
+                category = (
+                    FailureCategory.TRANSIENT_EXTERNAL
+                    if looks_transient(str(exc))
+                    else FailureCategory.REMOTE_STATE_MISMATCH
+                )
+                raise PipelineBlocked(
+                    f"Unable to read existing GitHub issues/pull requests for duplicate detection: {exc}",
+                    category,
+                ) from exc
+
+            detect_duplicates(candidates, existing_issues, existing_prs)
+
+            max_new_issues = max(0, min(self.config.discovery_max_new_issues, max_candidates))
+            creation_targets = [c for c in candidates if c.status == "proposed"][:max_new_issues]
+            for candidate in creation_targets:
+                try:
+                    issue = self.github.create_issue(
+                        candidate.title,
+                        issue_body(candidate),
+                        candidate.labels,
+                        DISCOVERY_MARKER.format(key=candidate.key),
+                    )
+                    candidate.status = "created"
+                    candidate.issue_number = int(issue.get("number") or 0) or None
+                    candidate.issue_url = issue.get("url")
+                    self.state.event(
+                        task_db_id,
+                        "DISCOVERY_ISSUE_CREATED",
+                        json.dumps(
+                            {
+                                "key": candidate.key,
+                                "issue_number": candidate.issue_number,
+                                "issue_url": candidate.issue_url,
+                            }
+                        ),
+                    )
+                except Exception as exc:
+                    # A single failed issue creation must not abort the run: the
+                    # remaining candidates are still filed and the proposal
+                    # (already persisted above) stays recoverable/retryable.
+                    candidate.status = "failed"
+                    candidate.error = truncate(str(exc), 2000)
+                    self.state.event(
+                        task_db_id,
+                        "DISCOVERY_ISSUE_FAILED",
+                        json.dumps({"key": candidate.key, "title": candidate.title, "error": candidate.error}),
+                    )
+
+            result = DiscoveryResult(candidates=candidates)
+            result.created = [c for c in candidates if c.status == "created"]
+            result.duplicates = [c for c in candidates if c.status == "duplicate"]
+            result.failed = [c for c in candidates if c.status == "failed"]
+
+            max_auto = max(0, min(self.config.discovery_max_auto_implement, max_new_issues))
+            eligible = [
+                c for c in result.created
+                if within_bounds(c, self.config.discovery_max_risk, self.config.discovery_max_context_class)
+            ]
+            eligible.sort(key=lambda c: c.rank if c.rank is not None else 1 << 30)
+            for candidate in eligible[:max_auto]:
+                candidate.handoff = True
+            result.handoff_issue_numbers = [
+                c.issue_number for c in eligible[:max_auto] if c.issue_number is not None
+            ]
+
+            self.state.event(
+                task_db_id,
+                "DISCOVERY_SUMMARY",
+                json.dumps(result.to_dict(), ensure_ascii=False)[:16000],
+            )
+            self.state.set_status(public_id, TaskStatus.DONE)
+            return result
+
+        except PipelineBlocked as exc:
+            self.state.set_status(
+                public_id,
+                TaskStatus.BLOCKED,
+                str(exc),
+                failure_category=exc.category,
+            )
+            raise
+        except Exception as exc:
+            self.state.set_status(
+                public_id,
+                TaskStatus.FAILED,
+                str(exc),
+                failure_category=FailureCategory.TERMINAL_INTERNAL,
+            )
+            raise
+        finally:
+            # Discovery never commits, so the ephemeral worktree/branch can
+            # always be reclaimed, unlike the normal run() flow where cleanup
+            # is gated on a successful merge.
+            if worktree and branch:
+                try:
+                    self.git.cleanup(worktree, branch)
+                except Exception as exc:
+                    self.state.event(task_db_id, "CLEANUP_WARNING", truncate(str(exc), 4000))
 
     def run(self, public_id: str, labels: list[str] | None = None) -> None:
         task_row = self.state.task(public_id)

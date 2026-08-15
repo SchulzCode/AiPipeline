@@ -93,6 +93,17 @@ export default function ProjectPage() {
     }
   }
 
+  async function runDiscovery() {
+    setError("");
+
+    try {
+      const task = await api.createDiscoveryTask(id);
+      router.push(`/tasks/${task.id}`);
+    } catch (e) {
+      setError(String(e));
+    }
+  }
+
   if (!project) {
     return (
       <div className="text-zinc-500">
@@ -148,6 +159,25 @@ export default function ProjectPage() {
           </button>
         </div>
       </form>
+
+      {project.repository_full_name && (
+        <div className="mt-4 flex flex-wrap items-center justify-between gap-3 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+          <div>
+            <div className="text-sm font-semibold">Feature discovery</div>
+            <div className="mt-1 text-sm text-zinc-500">
+              Explore the repository read-only and file ranked, deduplicated feature candidates as GitHub issues. Nothing is implemented automatically unless auto-implementation is configured.
+            </div>
+          </div>
+
+          <button
+            type="button"
+            onClick={runDiscovery}
+            className="rounded-xl border border-white/15 px-4 py-2.5 font-semibold hover:bg-white/10"
+          >
+            Discover features
+          </button>
+        </div>
+      )}
 
       {error && (
         <div className="mt-4 rounded-xl border border-rose-500/30 bg-rose-500/10 p-3 text-sm text-rose-200">

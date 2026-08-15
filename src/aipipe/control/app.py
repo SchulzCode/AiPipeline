@@ -29,6 +29,8 @@ from .github_app import GitHubAppAuth, list_app_installations
 from .models import ControlEvent, ControlTask, Project, User, WebhookDelivery
 from .schemas import (
     ActivityFeedOut,
+    DiscoverySummaryOut,
+    DiscoveryTaskCreate,
     EventOut,
     IssueOut,
     IssueTaskCreate,
@@ -256,6 +258,23 @@ def create_issue_task(project_id: str, payload: IssueTaskCreate, _: User = Depen
         return task
 
 
+@app.post("/projects/{project_id}/discovery-tasks", response_model=TaskOut, status_code=202)
+def create_discovery_task(project_id: str, payload: DiscoveryTaskCreate, _: User = Depends(current_user)):
+    with database.session() as db:
+        project = db.get(Project, project_id)
+        if not project or not project.enabled:
+            raise HTTPException(404, "Project not found or disabled")
+        if not project.repository_full_name:
+            raise HTTPException(400, "Feature discovery requires a GitHub repository")
+        prompt = payload.prompt or "Discover valuable, implementation-ready feature candidates for this repository."
+        task = ControlTask(project_id=project_id, source="discovery", title="Feature discovery", prompt=prompt)
+        db.add(task)
+        db.flush()
+        add_event(db, task.id, "QUEUED", "Feature discovery queued")
+        db.expunge(task)
+        return task
+
+
 @app.get("/projects/{project_id}/issues", response_model=list[IssueOut])
 def project_issues(project_id: str, _: User = Depends(current_user)):
     with database.session() as db:
@@ -301,6 +320,63 @@ def task_activity(task_id: str, _: User = Depends(current_user)):
         project = db.get(Project, task.project_id)
         events = list(db.scalars(select(ControlEvent).where(ControlEvent.task_id == task_id).order_by(ControlEvent.id)).all())
         return build_activity_feed(task, events, _agent_label(project))
+
+
+@app.get("/tasks/{task_id}/discovery", response_model=DiscoverySummaryOut)
+def task_discovery(task_id: str, _: User = Depends(current_user)):
+    with database.session() as db:
+        task = db.get(ControlTask, task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        events = list(
+            db.scalars(
+                select(ControlEvent)
+                .where(ControlEvent.task_id == task_id, ControlEvent.kind == "core:event")
+                .order_by(ControlEvent.id)
+            ).all()
+        )
+
+    latest: tuple[ControlEvent, dict] | None = None
+    for event in events:
+        try:
+            payload = json.loads(event.detail or "{}")
+        except (TypeError, ValueError):
+            continue
+        if payload.get("event") == "DISCOVERY_SUMMARY":
+            latest = (event, payload)
+
+    if latest is None:
+        return DiscoverySummaryOut(status="pending")
+
+    event, payload = latest
+    try:
+        summary = json.loads(payload.get("detail") or "{}")
+    except (TypeError, ValueError):
+        summary = {}
+    return DiscoverySummaryOut(
+        status="ready",
+        candidates=summary.get("candidates", []),
+        created=summary.get("created", []),
+        duplicates=summary.get("duplicates", []),
+        failed=summary.get("failed", []),
+        handoff_issue_numbers=summary.get("handoff_issue_numbers", []),
+        updated_at=event.created_at,
+    )
+
+
+@app.get("/tasks/{task_id}/handoff-tasks", response_model=list[TaskOut])
+def task_handoff_tasks(task_id: str, _: User = Depends(current_user)):
+    with database.session() as db:
+        task = db.get(ControlTask, task_id)
+        if not task:
+            raise HTTPException(404, "Task not found")
+        return list(
+            db.scalars(
+                select(ControlTask)
+                .where(ControlTask.discovery_task_id == task_id)
+                .order_by(ControlTask.created_at)
+            ).all()
+        )
 
 
 @app.get("/tasks/{task_id}/stream")

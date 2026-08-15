@@ -51,6 +51,7 @@ class ControlTask(Base):
     risk: Mapped[str | None] = mapped_column(String(32), nullable=True)
     context_class: Mapped[str | None] = mapped_column(String(32), nullable=True)
     core_task_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    discovery_task_id: Mapped[str | None] = mapped_column(String(36), nullable=True, index=True)
     branch: Mapped[str | None] = mapped_column(Text, nullable=True)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)

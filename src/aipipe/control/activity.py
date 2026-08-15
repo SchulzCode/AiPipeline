@@ -36,6 +36,7 @@ PHASE_INFO: dict[str, tuple[str, str]] = {
     "ROUTING": ("Routing the task", "Classifying task type, risk level, and scope."),
     "PREPARING": ("Preparing the workspace", "Creating a working branch and installing project dependencies."),
     "DISCOVERY": ("Exploring the repository", "Reviewing repository structure and conventions relevant to the task."),
+    "DISCOVERING": ("Discovering features", "A read-only agent is exploring the repository to propose feature candidates."),
     "PLANNING": ("Planning the implementation", "Deciding the implementation approach before writing code."),
     "IMPLEMENTING": ("Implementing the change", "Writing code changes to satisfy the task requirements."),
     "VERIFYING": ("Running verification", "Running quality, security, and secret-scanning checks."),
@@ -289,6 +290,78 @@ class _Builder:
                 f"{self.agent_label} wrote code changes for the task.",
                 "Change applied." if ok else "Attempt produced no usable change.",
                 "success" if ok else "warning",
+                ts,
+                event_id,
+            )
+            return
+
+        if inner == "DISCOVERY_AGENT_RUN":
+            match = _ATTEMPT_RE.search(detail_text)
+            attempt = match.group(1) if match else "?"
+            ok = bool(match) and match.group(2) == "0"
+            self._append(
+                category,
+                f"Discovery attempt {attempt}",
+                f"{self.agent_label} explored the repository for feature candidates.",
+                "Response received." if ok else "Attempt produced no usable response.",
+                "success" if ok else "warning",
+                ts,
+                event_id,
+            )
+            return
+
+        if inner == "DISCOVERY_CANDIDATES":
+            payload = _parse_json(detail_text, [])
+            count = len(payload) if isinstance(payload, list) else 0
+            self._append(
+                category,
+                "Feature candidates proposed",
+                f"{self.agent_label} proposed and ranked candidate features.",
+                f"{count} candidate(s) ranked.",
+                "success",
+                ts,
+                event_id,
+            )
+            return
+
+        if inner == "DISCOVERY_ISSUE_CREATED":
+            payload = _parse_json(detail_text, {})
+            self._append(
+                category,
+                "Issue filed",
+                "A ranked candidate was filed as a GitHub issue.",
+                f"Issue #{payload.get('issue_number')} created.",
+                "success",
+                ts,
+                event_id,
+            )
+            return
+
+        if inner == "DISCOVERY_ISSUE_FAILED":
+            payload = _parse_json(detail_text, {})
+            self._append(
+                category,
+                "Issue creation failed",
+                "A candidate could not be filed as a GitHub issue. The proposal itself was preserved and can be retried.",
+                payload.get("error") or "Unknown error.",
+                "warning",
+                ts,
+                event_id,
+            )
+            return
+
+        if inner == "DISCOVERY_SUMMARY":
+            payload = _parse_json(detail_text, {})
+            created = len(payload.get("created", [])) if isinstance(payload, dict) else 0
+            duplicates = len(payload.get("duplicates", [])) if isinstance(payload, dict) else 0
+            failed = len(payload.get("failed", [])) if isinstance(payload, dict) else 0
+            handoff = len(payload.get("handoff_issue_numbers", [])) if isinstance(payload, dict) else 0
+            self._append(
+                category,
+                "Discovery summary",
+                "Feature discovery finished without modifying repository code.",
+                f"{created} issue(s) created, {duplicates} duplicate(s) skipped, {failed} failed, {handoff} handed off.",
+                "success",
                 ts,
                 event_id,
             )

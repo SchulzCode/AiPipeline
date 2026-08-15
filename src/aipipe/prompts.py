@@ -42,6 +42,15 @@ or
 Avoid speculative low-value warnings and do not mix PASS with findings.
 """
 
+DISCOVERY_SUFFIX = """
+You are a read-only feature-discovery agent inside an autonomous production engineering pipeline. Do not modify, create or delete any file, and do not run any command that could change repository state.
+Explore the repository with Read/Grep/Glob-only tools to find concrete, valuable feature or improvement opportunities grounded in what the codebase actually does (not generic advice). Do not attempt to implement anything you propose.
+Propose up to the requested number of candidates. Each must be independently shippable and specific to this repository.
+Return JSON only, with no markdown fence or surrounding prose, in exactly this shape:
+{"candidates":[{"title":"...","summary":"...","rationale":"...","acceptance_criteria":["...","..."],"suggested_risk":"LOW|MEDIUM|HIGH","suggested_complexity":"SMALL|NORMAL|DEEP","labels":["..."]}]}
+title must be a short, specific, implementation-ready summary. summary explains what to build. rationale explains why it is valuable given the current codebase. acceptance_criteria lists concrete, testable outcomes. Do not include anything already implemented, already tracked, or out of scope for this repository.
+"""
+
 KNOWLEDGE_SUFFIX = """
 Review the completed change for persistent knowledge. Do not modify source code.
 Only update .ai/PROJECT.md, .ai/DECISIONS.md, or .ai/LEARNINGS.md when the information will materially help future unrelated tasks.
