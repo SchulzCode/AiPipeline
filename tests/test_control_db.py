@@ -70,14 +70,19 @@ def test_project_model_roundtrip(tmp_path):
 def test_create_all_upgrades_existing_control_schema(tmp_path):
     db = Database(settings(tmp_path))
 
-    # Simulate an installation created before model/failure/build columns were
-    # introduced. Other tables are allowed to be created normally by create_all.
+    # Schema immediately before the hardening fields were introduced. It is
+    # deliberately complete apart from columns with an explicit upgrade path;
+    # create_all is not expected to invent arbitrary historical migrations.
     with db.engine.begin() as connection:
         connection.execute(text(
             """
             CREATE TABLE control_projects (
                 id VARCHAR(36) PRIMARY KEY,
                 name VARCHAR(255) NOT NULL,
+                repository_full_name VARCHAR(512),
+                repository_url TEXT,
+                local_path TEXT,
+                installation_id INTEGER,
                 default_branch VARCHAR(255) NOT NULL,
                 agent VARCHAR(32) NOT NULL,
                 enabled BOOLEAN NOT NULL,
@@ -92,11 +97,23 @@ def test_create_all_upgrades_existing_control_schema(tmp_path):
                 id VARCHAR(36) PRIMARY KEY,
                 project_id VARCHAR(36) NOT NULL,
                 source VARCHAR(32) NOT NULL,
+                source_reference VARCHAR(255),
+                title VARCHAR(512),
                 prompt TEXT NOT NULL,
                 status VARCHAR(32) NOT NULL,
+                risk VARCHAR(32),
+                context_class VARCHAR(32),
+                core_task_id VARCHAR(32),
+                branch TEXT,
+                pr_number INTEGER,
+                error TEXT,
                 input_tokens INTEGER NOT NULL,
                 output_tokens INTEGER NOT NULL,
-                created_at DATETIME NOT NULL
+                claimed_by VARCHAR(255),
+                heartbeat_at DATETIME,
+                created_at DATETIME NOT NULL,
+                started_at DATETIME,
+                completed_at DATETIME
             )
             """
         ))
