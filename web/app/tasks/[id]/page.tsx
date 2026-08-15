@@ -4,6 +4,7 @@ import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { API, api } from "@/lib/api";
+import { agentLabel } from "@/lib/format";
 import type { ActivityFeed, ActivityItem, ActivityStatus, Event, Project, Task } from "@/lib/types";
 import { StatusBadge } from "@/components/status-badge";
 import { TaskTimer } from "@/components/task-timer";
@@ -255,11 +256,6 @@ function Info({ label, value }: { label: string; value: React.ReactNode }) {
       <div className="mt-1 font-medium">{value}</div>
     </div>
   );
-}
-
-function agentLabel(project: Project): string {
-  const base = project.agent === "claude" ? "Claude" : project.agent === "codex" ? "Codex" : project.agent;
-  return project.model ? `${base} · ${project.model}` : base;
 }
 
 function formatShortDuration(totalSeconds: number): string {

@@ -2,10 +2,35 @@ import json
 from pathlib import Path
 
 from aipipe.agents import agent_models, build_agent
+from aipipe.agents.base import collect_env, finalize_result
 from aipipe.agents.codex import CodexAdapter
 from aipipe.agents.claude import ClaudeAdapter
 from aipipe.config import PipelineConfig
 from aipipe.util import CommandResult
+
+
+def test_collect_env_forwards_only_set_keys(monkeypatch):
+    monkeypatch.setenv("AIPIPE_TEST_KEY_A", "value-a")
+    monkeypatch.delenv("AIPIPE_TEST_KEY_B", raising=False)
+    result = collect_env(("AIPIPE_TEST_KEY_A", "AIPIPE_TEST_KEY_B"))
+    assert result == {"AIPIPE_TEST_KEY_A": "value-a"}
+
+
+def test_finalize_result_appends_stderr_and_truncates():
+    result = CommandResult(["cmd"], 0, "", "boom")
+    agent_result = finalize_result(result, "output text")
+    assert agent_result.ok
+    assert "output text" in agent_result.output
+    assert "STDERR:\nboom" in agent_result.output
+
+
+def test_finalize_result_omits_stderr_section_when_empty():
+    result = CommandResult(["cmd"], 1, "", "")
+    agent_result = finalize_result(result, "output text", input_tokens=3, output_tokens=5)
+    assert not agent_result.ok
+    assert agent_result.output == "output text"
+    assert agent_result.input_tokens == 3
+    assert agent_result.output_tokens == 5
 
 
 def test_agent_classes_expose_names():

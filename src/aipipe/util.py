@@ -78,3 +78,28 @@ def truncate(text: str, limit: int = 12000) -> str:
 
 def json_dumps(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, indent=2)
+
+
+def execute_commands(
+    commands: dict[str, str],
+    cwd: Path,
+    timeout: int,
+    runtime_env: dict[str, str] | None = None,
+    output_limit: int = 12000,
+) -> list[tuple[str, CommandResult]]:
+    """Run named shell commands in order, truncating output and stopping at the first failure.
+
+    Shared by SetupEngine, QualityEngine and SecurityEngine so a broken
+    prerequisite command produces one clear failure instead of a cascade of
+    noisy or misleading downstream errors.
+    """
+    env = safe_process_env(runtime_env)
+    results: list[tuple[str, CommandResult]] = []
+    for name, command in commands.items():
+        result = run(command, cwd, timeout, shell=True, env=env, inherit_env=False)
+        result.stdout = truncate(result.stdout, output_limit)
+        result.stderr = truncate(result.stderr, output_limit)
+        results.append((name, result))
+        if not result.ok:
+            break
+    return results

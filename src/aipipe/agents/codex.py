@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
-from .base import AgentResult, ModelOption
+from .base import AgentResult, ModelOption, collect_env, finalize_result
 from ..util import require_binary, run, safe_process_env, truncate
 
 
@@ -36,21 +35,18 @@ class CodexAdapter:
         if model:
             cmd += ["--model", str(model)]
         cmd.append(prompt)
-        auth_keys = (
+        auth_env = collect_env((
             "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_ORG_ID",
             "OPENAI_PROJECT_ID", "CODEX_HOME",
-        )
-        auth_env = {key: value for key in auth_keys if (value := os.environ.get(key))}
+        ))
         r = run(cmd, workspace, self.timeout, env=safe_process_env({**self.runtime_env, **auth_env}), inherit_env=False)
         final = ""
         input_tokens = output_tokens = 0
-        raw_events = []
         for line in r.stdout.splitlines():
             try:
                 event = json.loads(line)
             except json.JSONDecodeError:
                 continue
-            raw_events.append(event)
             if event.get("type") == "item.completed":
                 item = event.get("item", {})
                 if item.get("type") == "agent_message":
@@ -59,7 +55,4 @@ class CodexAdapter:
                 usage = event.get("usage", {})
                 input_tokens += int(usage.get("input_tokens", 0) or 0)
                 output_tokens += int(usage.get("output_tokens", 0) or 0)
-        output = final or truncate(r.stdout, 18000)
-        if r.stderr:
-            output += "\nSTDERR:\n" + truncate(r.stderr, 6000)
-        return AgentResult(r.ok, truncate(output, 24000), r.returncode, input_tokens, output_tokens)
+        return finalize_result(r, final or truncate(r.stdout, 18000), input_tokens, output_tokens)

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 from importlib.resources import files
 from pathlib import Path
 

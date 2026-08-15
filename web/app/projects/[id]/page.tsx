@@ -11,6 +11,7 @@ import {
 
 import { StatusBadge } from "@/components/status-badge";
 import { api } from "@/lib/api";
+import { agentLabel } from "@/lib/format";
 import type { Issue, Project, Task } from "@/lib/types";
 
 export default function ProjectPage() {
@@ -116,7 +117,7 @@ export default function ProjectPage() {
             <StatusBadge status={project.status} />
 
             <span className="text-sm text-zinc-500">
-              {project.agent} · {project.model || "Default model"} · {project.default_branch}
+              {agentLabel(project)} · {project.default_branch}
             </span>
           </div>
         </div>

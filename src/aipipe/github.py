@@ -222,24 +222,34 @@ class GitHubAdapter:
         state = self.pr_state(worktree, pr)
         return str(state.get("headRefOid") or "").strip()
 
-    def _api_check_runs_for_ref(self, worktree: Path, head_sha: str, pr: int) -> list[dict]:
-        r = self._run_read(
-            [
-                "gh", "api", "--method", "GET",
-                f"repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs",
-                "-H", "Accept: application/vnd.github+json",
-                "-H", "X-GitHub-Api-Version: 2026-03-10",
-                "-f", "per_page=100",
-                "-f", "filter=latest",
-            ],
-            worktree,
-        )
+    def _api_get(
+        self,
+        worktree: Path,
+        path: str,
+        fields: dict[str, str],
+        context: str,
+        error_prefix: str,
+    ) -> dict:
+        cmd = [
+            "gh", "api", "--method", "GET", path,
+            "-H", "Accept: application/vnd.github+json",
+            "-H", "X-GitHub-Api-Version: 2026-03-10",
+        ]
+        for key, value in fields.items():
+            cmd += ["-f", f"{key}={value}"]
+        r = self._run_read(cmd, worktree)
         if not r.ok:
-            raise self._command_error(
-                f"GitHub Checks API query failed for PR #{pr} ({head_sha})",
-                r,
-            )
-        payload = self._parse_json_object(r.stdout, "GitHub Checks API")
+            raise self._command_error(error_prefix, r)
+        return self._parse_json_object(r.stdout, context)
+
+    def _api_check_runs_for_ref(self, worktree: Path, head_sha: str, pr: int) -> list[dict]:
+        payload = self._api_get(
+            worktree,
+            f"repos/{{owner}}/{{repo}}/commits/{head_sha}/check-runs",
+            {"per_page": "100", "filter": "latest"},
+            "GitHub Checks API",
+            f"GitHub Checks API query failed for PR #{pr} ({head_sha})",
+        )
         raw_runs = payload.get("check_runs", [])
         if not isinstance(raw_runs, list):
             raise RuntimeError("GitHub Checks API response has invalid check_runs data.")
@@ -304,24 +314,13 @@ class GitHubAdapter:
         event: str = "pull_request",
         per_page: int = 100,
     ) -> list[dict]:
-        r = self._run_read(
-            [
-                "gh", "api", "--method", "GET",
-                "repos/{owner}/{repo}/actions/runs",
-                "-H", "Accept: application/vnd.github+json",
-                "-H", "X-GitHub-Api-Version: 2026-03-10",
-                "-f", f"head_sha={head_sha}",
-                "-f", f"event={event}",
-                "-f", f"per_page={per_page}",
-            ],
+        payload = self._api_get(
             worktree,
+            "repos/{owner}/{repo}/actions/runs",
+            {"head_sha": head_sha, "event": event, "per_page": str(per_page)},
+            "GitHub Actions API",
+            f"GitHub Actions API query failed for commit {head_sha}",
         )
-        if not r.ok:
-            raise self._command_error(
-                f"GitHub Actions API query failed for commit {head_sha}",
-                r,
-            )
-        payload = self._parse_json_object(r.stdout, "GitHub Actions API")
         runs = payload.get("workflow_runs", [])
         if not isinstance(runs, list):
             raise RuntimeError("GitHub Actions API response has invalid workflow_runs data.")

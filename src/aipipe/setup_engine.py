@@ -6,7 +6,7 @@ import tomllib
 from dataclasses import dataclass
 from pathlib import Path
 
-from .util import CommandResult, run, safe_process_env, truncate
+from .util import CommandResult, execute_commands, run, safe_process_env, truncate
 
 
 @dataclass
@@ -61,27 +61,7 @@ class SetupEngine:
         if not commands and self.auto:
             commands, runtime_env = self._autodetect(repo)
 
-        results: list[tuple[str, CommandResult]] = []
-        env = safe_process_env(runtime_env)
-
-        for name, command in commands.items():
-            result = run(
-                command,
-                repo,
-                self.timeout,
-                shell=True,
-                env=env,
-                inherit_env=False,
-            )
-
-            result.stdout = truncate(result.stdout, 9000)
-            result.stderr = truncate(result.stderr, 9000)
-
-            results.append((name, result))
-
-            if not result.ok:
-                break
-
+        results = execute_commands(commands, repo, self.timeout, runtime_env, output_limit=9000)
         return SetupOutcome(results, runtime_env)
 
     def _autodetect(

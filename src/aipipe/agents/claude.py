@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
-from .base import AgentResult, ModelOption
-from ..util import require_binary, run, safe_process_env, truncate
+from .base import AgentResult, ModelOption, collect_env, finalize_result
+from ..util import require_binary, run, safe_process_env
 
 
 class ClaudeAdapter:
@@ -43,14 +42,13 @@ class ClaudeAdapter:
         if max_turns is not None:
             cmd += ["--max-turns", str(max_turns)]
         cmd.append(prompt)
-        auth_keys = (
+        auth_env = collect_env((
             "ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN", "ANTHROPIC_BASE_URL",
             "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_CUSTOM_HEADERS",
             "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX",
             "AWS_REGION", "AWS_DEFAULT_REGION", "AWS_PROFILE",
             "GOOGLE_APPLICATION_CREDENTIALS", "CLOUD_ML_REGION",
-        )
-        auth_env = {key: value for key in auth_keys if (value := os.environ.get(key))}
+        ))
         r = run(cmd, workspace, self.timeout, env=safe_process_env({**self.runtime_env, **auth_env}), inherit_env=False)
         final = ""
         input_tokens = output_tokens = 0
@@ -72,7 +70,4 @@ class ClaudeAdapter:
                     input_tokens, output_tokens = i, o
         except json.JSONDecodeError:
             final = r.stdout
-        output = final or r.stdout
-        if r.stderr:
-            output += "\nSTDERR:\n" + truncate(r.stderr, 6000)
-        return AgentResult(r.ok, truncate(output, 24000), r.returncode, input_tokens, output_tokens)
+        return finalize_result(r, final or r.stdout, input_tokens, output_tokens)

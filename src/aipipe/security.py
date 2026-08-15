@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .util import CommandResult, run, safe_process_env, truncate
+from .util import CommandResult, execute_commands
 
 
 SECRET_PATTERNS = [
@@ -36,12 +36,4 @@ class SecurityEngine:
         self.runtime_env = runtime_env or {}
 
     def execute_commands(self, repo: Path) -> list[tuple[str, CommandResult]]:
-        results = []
-        for name, command in self.commands.items():
-            result = run(command, repo, self.timeout, shell=True, env=safe_process_env(self.runtime_env), inherit_env=False)
-            result.stdout = truncate(result.stdout)
-            result.stderr = truncate(result.stderr)
-            results.append((name, result))
-            if not result.ok:
-                break
-        return results
+        return execute_commands(self.commands, repo, self.timeout, self.runtime_env)

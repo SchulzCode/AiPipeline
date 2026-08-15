@@ -4,12 +4,11 @@ import secrets
 from urllib.parse import urlencode
 
 import httpx
-from fastapi import Depends, HTTPException, Request, Response, status
+from fastapi import HTTPException, Request, Response, status
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 from sqlalchemy import select
-from sqlalchemy.orm import Session
 
-from .config import ControlSettings, load_settings
+from .config import ControlSettings
 from .db import Database
 from .models import User
 
