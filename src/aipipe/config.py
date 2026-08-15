@@ -15,11 +15,14 @@ class PipelineConfig:
     auto_merge: bool = True
     merge_method: str = "squash"
     ci_timeout_seconds: int = 1800
+    ci_registration_grace_seconds: int = 90
     command_timeout_seconds: int = 1200
     implementation_attempts: int = 3
     verification_attempts: int = 3
     review_attempts: int = 2
     ci_attempts: int = 2
+    external_attempts: int = 3
+    external_backoff_seconds: float = 2.0
     setup_commands: dict[str, str] = field(default_factory=dict)
     setup_auto: bool = True
     quality_commands: dict[str, str] = field(default_factory=dict)
@@ -64,11 +67,14 @@ def load_config(repo: Path | None = None) -> PipelineConfig:
         auto_merge=git.get("auto_merge", merged.get("auto_merge", True)),
         merge_method=git.get("merge_method", merged.get("merge_method", "squash")),
         ci_timeout_seconds=int(merged.get("ci_timeout_seconds", 1800)),
+        ci_registration_grace_seconds=int(merged.get("ci_registration_grace_seconds", 90)),
         command_timeout_seconds=int(merged.get("command_timeout_seconds", 1200)),
         implementation_attempts=int(retries.get("implementation", 3)),
         verification_attempts=int(retries.get("verification", 3)),
         review_attempts=int(retries.get("review", 2)),
         ci_attempts=int(retries.get("ci", 2)),
+        external_attempts=int(retries.get("external", 3)),
+        external_backoff_seconds=float(retries.get("external_backoff_seconds", 2.0)),
         setup_commands=dict(setup.get("commands", {})),
         setup_auto=bool(setup.get("auto", True)),
         quality_commands=dict(quality.get("commands", {})),
