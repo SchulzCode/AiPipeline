@@ -46,6 +46,22 @@ class ProjectCreate(BaseModel):
         return self
 
 
+class ProjectUpdate(BaseModel):
+    name: str | None = Field(default=None, min_length=1, max_length=255)
+    agent: Literal["codex", "claude"] | None = None
+    model: str | None = None
+    enabled: bool | None = None
+
+    @model_validator(mode="after")
+    def model_matches_agent(self):
+        if self.model is None or self.agent is None:
+            return self
+        valid_ids = {m.id for m in agent_models(self.agent) if m.id}
+        if self.model not in valid_ids:
+            raise ValueError(f"Model '{self.model}' is not available for agent '{self.agent}'")
+        return self
+
+
 class ProjectOut(ORMModel):
     id: str
     name: str
@@ -95,6 +111,12 @@ class TaskOut(ORMModel):
     created_at: datetime
     started_at: datetime | None
     completed_at: datetime | None
+
+
+class TaskWithProjectOut(TaskOut):
+    project_name: str
+    project_agent: str
+    project_model: str | None = None
 
 
 class EventOut(ORMModel):
@@ -159,11 +181,18 @@ class CiSummaryOut(BaseModel):
     failed: int
 
 
+class PlanSummaryOut(BaseModel):
+    status: str
+    plan: str
+    updated_at: datetime
+
+
 class ChecksSummaryOut(BaseModel):
     checks: list[CheckStatusOut] = []
     review: ReviewSummaryOut | None = None
     security_review: ReviewSummaryOut | None = None
     ci: CiSummaryOut | None = None
+    plan: PlanSummaryOut | None = None
 
 
 class ActivityFeedOut(BaseModel):
@@ -201,3 +230,92 @@ class DiscoverySummaryOut(BaseModel):
     failed: list[str] = []
     handoff_issue_numbers: list[int] = []
     updated_at: datetime | None = None
+
+
+class SystemHealthOut(BaseModel):
+    projects_total: int
+    projects_by_status: dict[str, int] = {}
+    tasks_by_status: dict[str, int] = {}
+    active_tasks: int
+    active_workers: int
+    stale_tasks: int
+    worker_stale_seconds: float
+    dev_auth: bool
+    github_app_configured: bool
+    github_login_configured: bool
+    database: str
+
+
+class ProjectPipelineConfigOut(BaseModel):
+    main_branch: str
+    agent: str
+    auto_merge: bool
+    merge_method: str
+    ci_timeout_seconds: int
+    ci_registration_grace_seconds: int
+    command_timeout_seconds: int
+    implementation_attempts: int
+    verification_attempts: int
+    review_attempts: int
+    ci_attempts: int
+    external_attempts: int
+    external_backoff_seconds: float
+    planner_attempts: int
+    planner_enabled: bool
+    planner_context_classes: list[str]
+    setup_commands: dict[str, str] = {}
+    setup_auto: bool
+    quality_commands: dict[str, str] = {}
+    security_commands: dict[str, str] = {}
+    discovery_max_candidates: int
+    discovery_max_new_issues: int
+    discovery_max_auto_implement: int
+    discovery_max_risk: str
+    discovery_max_context_class: str
+    discovery_attempts: int
+
+
+class ProjectConfigOut(BaseModel):
+    source: Literal["local", "github", "unavailable"]
+    editable: bool
+    config: ProjectPipelineConfigOut
+    warning: str | None = None
+
+
+class ProjectConfigPatch(BaseModel):
+    main_branch: str | None = Field(default=None, min_length=1, max_length=255)
+    agent: Literal["codex", "claude"] | None = None
+    auto_merge: bool | None = None
+    merge_method: Literal["squash", "merge", "rebase"] | None = None
+    ci_timeout_seconds: int | None = Field(default=None, ge=60, le=21600)
+    ci_registration_grace_seconds: int | None = Field(default=None, ge=0, le=3600)
+    command_timeout_seconds: int | None = Field(default=None, ge=30, le=21600)
+    implementation_attempts: int | None = Field(default=None, ge=1, le=10)
+    verification_attempts: int | None = Field(default=None, ge=1, le=10)
+    review_attempts: int | None = Field(default=None, ge=1, le=10)
+    ci_attempts: int | None = Field(default=None, ge=1, le=10)
+    external_attempts: int | None = Field(default=None, ge=1, le=10)
+    external_backoff_seconds: float | None = Field(default=None, ge=0, le=60)
+    planner_attempts: int | None = Field(default=None, ge=1, le=10)
+    planner_enabled: bool | None = None
+    planner_context_classes: list[Literal["SHALLOW", "NORMAL", "DEEP"]] | None = None
+    setup_auto: bool | None = None
+    setup_commands: dict[str, str] | None = None
+    quality_commands: dict[str, str] | None = None
+    security_commands: dict[str, str] | None = None
+    discovery_max_candidates: int | None = Field(default=None, ge=0, le=50)
+    discovery_max_new_issues: int | None = Field(default=None, ge=0, le=50)
+    discovery_max_auto_implement: int | None = Field(default=None, ge=0, le=20)
+    discovery_max_risk: Literal["LOW", "MEDIUM", "HIGH"] | None = None
+    discovery_max_context_class: Literal["SHALLOW", "NORMAL", "DEEP"] | None = None
+    discovery_attempts: int | None = Field(default=None, ge=1, le=10)
+
+    @model_validator(mode="after")
+    def reject_command_secrets(self):
+        for commands in (self.setup_commands, self.quality_commands, self.security_commands):
+            if not commands:
+                continue
+            for name, command in commands.items():
+                if len(name) > 100 or len(command) > 2000:
+                    raise ValueError("Command name/body exceeds the allowed length")
+        return self

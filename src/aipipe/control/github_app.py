@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import stat
 import time
 from dataclasses import dataclass
@@ -133,3 +134,36 @@ class GitHubAppAuth:
     def issues(self, full_name: str) -> list[dict[str, Any]]:
         items = self.request("GET", f"/repos/{full_name}/issues", params={"state": "open", "per_page": 50}).json()
         return [x for x in items if "pull_request" not in x]
+
+    def get_contents(self, full_name: str, path: str, ref: str | None = None) -> tuple[str, str] | None:
+        """Fetch a repo file's decoded text content and blob sha, or None if it does not exist."""
+        params = {"ref": ref} if ref else {}
+        try:
+            response = self.request("GET", f"/repos/{full_name}/contents/{path}", params=params)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                return None
+            raise
+        data = response.json()
+        content = base64.b64decode(data["content"]).decode("utf-8")
+        return content, data["sha"]
+
+    def put_contents(
+        self,
+        full_name: str,
+        path: str,
+        content: str,
+        message: str,
+        branch: str | None = None,
+        sha: str | None = None,
+    ) -> None:
+        """Create or update a repo file via the Contents API (commits directly to `branch`)."""
+        body: dict[str, Any] = {
+            "message": message,
+            "content": base64.b64encode(content.encode("utf-8")).decode("ascii"),
+        }
+        if branch:
+            body["branch"] = branch
+        if sha:
+            body["sha"] = sha
+        self.request("PUT", f"/repos/{full_name}/contents/{path}", json=body)

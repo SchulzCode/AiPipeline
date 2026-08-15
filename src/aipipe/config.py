@@ -53,18 +53,25 @@ def _load_yaml(path: Path) -> dict[str, Any]:
     return data
 
 
-def load_config(repo: Path | None = None) -> PipelineConfig:
+def merge_config_layers(*layers: dict[str, Any]) -> dict[str, Any]:
+    """Shallow-merge raw YAML config documents, later layers winning per
+    top-level key (nested dicts are merged one level deep)."""
     merged: dict[str, Any] = {}
-    global_cfg = _load_yaml(home_dir() / "config" / "config.yml")
-    merged.update(global_cfg)
-    if repo:
-        project_cfg = _load_yaml(repo / ".ai" / "config.yml")
-        for key, value in project_cfg.items():
+    for layer in layers:
+        for key, value in layer.items():
             if isinstance(value, dict) and isinstance(merged.get(key), dict):
                 merged[key] = {**merged[key], **value}
             else:
                 merged[key] = value
+    return merged
 
+
+def config_from_merged(merged: dict[str, Any]) -> PipelineConfig:
+    """Build a PipelineConfig from an already-merged raw YAML document. This
+    is the single source of truth for the YAML shape <-> dataclass field
+    mapping; load_config() and any caller with an in-memory document (e.g.
+    the control-plane project-settings API, which may not have a local
+    checkout for GitHub-backed projects) both go through this function."""
     retries = merged.get("retries", {})
     setup = merged.get("setup", {})
     quality = merged.get("quality", {})
@@ -104,3 +111,9 @@ def load_config(repo: Path | None = None) -> PipelineConfig:
         codex=dict(merged.get("codex", {})),
         claude=dict(merged.get("claude", {})),
     )
+
+
+def load_config(repo: Path | None = None) -> PipelineConfig:
+    global_cfg = _load_yaml(home_dir() / "config" / "config.yml")
+    project_cfg = _load_yaml(repo / ".ai" / "config.yml") if repo else {}
+    return config_from_merged(merge_config_layers(global_cfg, project_cfg))

@@ -4,6 +4,7 @@ import asyncio
 import hmac
 import json
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Request, Response
@@ -11,7 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
 from sqlalchemy import select
 
-from aipipe.agents import AGENT_MODELS
+from aipipe.agents import AGENT_MODELS, agent_models
 
 from .activity import build_activity_feed
 from .auth import (
@@ -27,6 +28,14 @@ from .config import load_settings
 from .db import Database
 from .github_app import GitHubAppAuth, list_app_installations
 from .models import ControlEvent, ControlTask, Project, User, WebhookDelivery
+from .project_config import (
+    ProjectConfigError,
+    apply_patch_to_yaml,
+    config_to_dict,
+    read_project_config,
+    resolved_config,
+    write_project_config,
+)
 from .schemas import (
     ActivityFeedOut,
     DiscoverySummaryOut,
@@ -34,10 +43,15 @@ from .schemas import (
     EventOut,
     IssueOut,
     IssueTaskCreate,
+    ProjectConfigOut,
+    ProjectConfigPatch,
     ProjectCreate,
     ProjectOut,
+    ProjectUpdate,
+    SystemHealthOut,
     TaskCreate,
     TaskOut,
+    TaskWithProjectOut,
     UserOut,
 )
 from .security import verify_github_signature
@@ -203,6 +217,26 @@ def get_project(project_id: str, _: User = Depends(current_user)):
         return project
 
 
+@app.patch("/projects/{project_id}", response_model=ProjectOut)
+def update_project(project_id: str, payload: ProjectUpdate, _: User = Depends(current_user)):
+    with database.session() as db:
+        project = db.get(Project, project_id)
+        if not project:
+            raise HTTPException(404, "Project not found")
+        fields = payload.model_dump(exclude_unset=True)
+        final_agent = fields.get("agent", project.agent)
+        final_model = fields.get("model", project.model)
+        if final_model is not None:
+            valid_ids = {m.id for m in agent_models(final_agent) if m.id}
+            if final_model not in valid_ids:
+                raise HTTPException(422, f"Model '{final_model}' is not available for agent '{final_agent}'")
+        for key, value in fields.items():
+            setattr(project, key, value)
+        db.flush()
+        db.expunge(project)
+        return project
+
+
 @app.delete("/projects/{project_id}", status_code=204)
 def delete_project(project_id: str, _: User = Depends(current_user)):
     with database.session() as db:
@@ -220,6 +254,38 @@ def delete_project(project_id: str, _: User = Depends(current_user)):
 def list_project_tasks(project_id: str, _: User = Depends(current_user)):
     with database.session() as db:
         return list(db.scalars(select(ControlTask).where(ControlTask.project_id == project_id).order_by(ControlTask.created_at.desc()).limit(100)).all())
+
+
+@app.get("/tasks", response_model=list[TaskWithProjectOut])
+def list_tasks(
+    status: str | None = None,
+    project_id: str | None = None,
+    source: str | None = None,
+    limit: int = 200,
+    _: User = Depends(current_user),
+):
+    """Cross-project task listing for the global operations view. Bounded by
+    `limit` (max 500) to avoid unbounded scans as project/task counts grow."""
+    limit = max(1, min(limit, 500))
+    with database.session() as db:
+        query = select(ControlTask, Project).join(Project, ControlTask.project_id == Project.id)
+        if status:
+            query = query.where(ControlTask.status == status.upper())
+        if project_id:
+            query = query.where(ControlTask.project_id == project_id)
+        if source:
+            query = query.where(ControlTask.source == source)
+        query = query.order_by(ControlTask.created_at.desc()).limit(limit)
+        rows = db.execute(query).all()
+        return [
+            TaskWithProjectOut(
+                **TaskOut.model_validate(task).model_dump(),
+                project_name=project.name,
+                project_agent=project.agent,
+                project_model=project.model,
+            )
+            for task, project in rows
+        ]
 
 
 @app.post("/projects/{project_id}/tasks", response_model=TaskOut, status_code=202)
@@ -293,6 +359,40 @@ def project_issues(project_id: str, _: User = Depends(current_user)):
         IssueOut(number=i["number"], title=i["title"], state=i["state"], url=i["html_url"], labels=[x["name"] for x in i.get("labels", [])])
         for i in issues
     ]
+
+
+@app.get("/projects/{project_id}/config", response_model=ProjectConfigOut)
+def get_project_config(project_id: str, _: User = Depends(current_user)):
+    with database.session() as db:
+        project = db.get(Project, project_id)
+        if not project:
+            raise HTTPException(404, "Project not found")
+        db.expunge(project)
+    try:
+        source, raw_doc, warning = read_project_config(project, settings)
+    except ProjectConfigError as exc:
+        raise HTTPException(502, str(exc))
+    cfg = resolved_config(raw_doc)
+    return ProjectConfigOut(source=source, editable=source != "unavailable", config=config_to_dict(cfg), warning=warning)
+
+
+@app.patch("/projects/{project_id}/config", response_model=ProjectConfigOut)
+def patch_project_config(project_id: str, payload: ProjectConfigPatch, _: User = Depends(current_user)):
+    with database.session() as db:
+        project = db.get(Project, project_id)
+        if not project:
+            raise HTTPException(404, "Project not found")
+        db.expunge(project)
+    try:
+        source, raw_doc, _warning = read_project_config(project, settings)
+        if source == "unavailable":
+            raise HTTPException(400, "This project has no local path or GitHub repository to write configuration to")
+        updated_doc = apply_patch_to_yaml(raw_doc, payload.model_dump(exclude_unset=True))
+        write_project_config(project, settings, updated_doc)
+    except ProjectConfigError as exc:
+        raise HTTPException(502, str(exc))
+    cfg = resolved_config(updated_doc)
+    return ProjectConfigOut(source=source, editable=True, config=config_to_dict(cfg), warning=None)
 
 
 @app.get("/tasks/{task_id}", response_model=TaskOut)
@@ -484,6 +584,51 @@ def public_settings(_: User = Depends(current_user)):
         "github_login_configured": bool(settings.github_app_client_id and settings.github_app_client_secret),
         "database": "postgresql" if settings.database_url.startswith("postgresql") else "sqlite",
     }
+
+
+@app.get("/system/health", response_model=SystemHealthOut)
+def system_health(_: User = Depends(current_user)):
+    """Aggregated diagnostics for the system-health view. `active_workers` is
+    inferred from distinct `claimed_by` values on non-terminal tasks with a
+    heartbeat newer than `worker_stale_seconds` — it reflects claimed, live
+    tasks, not a real worker/process registry."""
+    stale_cutoff = datetime.now(timezone.utc) - timedelta(seconds=settings.worker_stale_seconds)
+    with database.session() as db:
+        projects = list(db.scalars(select(Project)).all())
+        active_tasks = list(db.scalars(select(ControlTask).where(ControlTask.status.notin_(TERMINAL))).all())
+
+    projects_by_status: dict[str, int] = {}
+    for project in projects:
+        projects_by_status[project.status] = projects_by_status.get(project.status, 0) + 1
+
+    tasks_by_status: dict[str, int] = {}
+    active_workers: set[str] = set()
+    stale_tasks = 0
+    for task in active_tasks:
+        tasks_by_status[task.status] = tasks_by_status.get(task.status, 0) + 1
+        if task.claimed_by and task.heartbeat_at:
+            # SQLite drops tzinfo on round-trip even for DateTime(timezone=True)
+            # columns; heartbeat_at is always written via utcnow(), so a naive
+            # value is UTC.
+            heartbeat = task.heartbeat_at if task.heartbeat_at.tzinfo else task.heartbeat_at.replace(tzinfo=timezone.utc)
+            if heartbeat >= stale_cutoff:
+                active_workers.add(task.claimed_by)
+            else:
+                stale_tasks += 1
+
+    return SystemHealthOut(
+        projects_total=len(projects),
+        projects_by_status=projects_by_status,
+        tasks_by_status=tasks_by_status,
+        active_tasks=len(active_tasks),
+        active_workers=len(active_workers),
+        stale_tasks=stale_tasks,
+        worker_stale_seconds=settings.worker_stale_seconds,
+        dev_auth=settings.dev_auth,
+        github_app_configured=bool(settings.github_app_id and settings.github_app_private_key),
+        github_login_configured=bool(settings.github_app_client_id and settings.github_app_client_secret),
+        database="postgresql" if settings.database_url.startswith("postgresql") else "sqlite",
+    )
 
 
 def main() -> None:
