@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import argparse
+import logging
 import os
 import socket
 import threading
 import time
+import uuid
 from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
@@ -19,11 +21,17 @@ from .models import ControlTask, Project
 from .service import TERMINAL, add_event
 
 
+logger = logging.getLogger(__name__)
+
+
 class Worker:
     def __init__(self, database: Database, worker_id: str | None = None):
         self.database = database
         self.settings = database.settings
-        self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}"
+        # PID 1 and the Docker hostname can both be reused after a container
+        # restart. Include a short boot nonce so stale-task diagnostics can
+        # distinguish the old worker process from its replacement.
+        self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
         self.build = build_identity()
         self.executor = TaskExecutor(database, self.settings)
 
@@ -92,14 +100,40 @@ class Worker:
                 return task.id
         return None
 
+    def _heartbeat_once(self, task_id: str) -> bool:
+        """Refresh one task heartbeat.
+
+        Returns False when the task is no longer owned by this worker and the
+        heartbeat loop should stop. Database errors are intentionally allowed to
+        propagate to the loop so they can be logged and retried on the next
+        interval instead of silently killing the daemon thread forever.
+        """
+
+        with self.database.session() as db:
+            task = db.get(ControlTask, task_id)
+            if not task or task.status in TERMINAL or task.claimed_by != self.worker_id:
+                return False
+            task.heartbeat_at = datetime.now(timezone.utc)
+            return True
+
     def _heartbeat(self, task_id: str, stop: threading.Event) -> None:
         interval = max(1.0, min(30.0, self.settings.worker_stale_seconds / 3.0))
         while not stop.wait(interval):
-            with self.database.session() as db:
-                task = db.get(ControlTask, task_id)
-                if not task or task.status in TERMINAL or task.claimed_by != self.worker_id:
+            try:
+                if not self._heartbeat_once(task_id):
                     return
-                task.heartbeat_at = datetime.now(timezone.utc)
+            except Exception as exc:  # noqa: BLE001 - heartbeat must self-heal
+                # Previously one transient DB/session failure terminated this
+                # daemon thread permanently. Five minutes later another worker
+                # could then falsely classify an otherwise healthy long-running
+                # agent invocation as WORKER_LOST. Keep the loop alive and let
+                # the next bounded heartbeat interval retry the write.
+                logger.warning(
+                    "Heartbeat update failed for task %s; will retry on the next interval: %s",
+                    task_id,
+                    exc,
+                    exc_info=True,
+                )
 
     def run_once(self) -> bool:
         task_id = self.claim()
