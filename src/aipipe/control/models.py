@@ -54,6 +54,8 @@ class ControlTask(Base):
     branch: Mapped[str | None] = mapped_column(Text, nullable=True)
     pr_number: Mapped[int | None] = mapped_column(Integer, nullable=True)
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    failure_category: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    worker_build: Mapped[str | None] = mapped_column(String(128), nullable=True)
     input_tokens: Mapped[int] = mapped_column(Integer, default=0)
     output_tokens: Mapped[int] = mapped_column(Integer, default=0)
     claimed_by: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
