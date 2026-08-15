@@ -38,6 +38,12 @@ export type Task = {
   started_at?: string | null;
   completed_at?: string | null;
 };
+export type TaskWithProject = Task & {
+  project_name: string;
+  project_agent: string;
+  project_model?: string | null;
+};
+
 export type Event = { id: number; task_id: string; kind: string; detail?: string | null; created_at: string };
 export type Issue = { number: number; title: string; state: string; url: string; labels: string[] };
 
@@ -117,3 +123,55 @@ export type DiscoverySummary = {
   handoff_issue_numbers: number[];
   updated_at?: string | null;
 };
+
+export type SystemHealth = {
+  projects_total: number;
+  projects_by_status: Record<string, number>;
+  tasks_by_status: Record<string, number>;
+  active_tasks: number;
+  active_workers: number;
+  stale_tasks: number;
+  worker_stale_seconds: number;
+  dev_auth: boolean;
+  github_app_configured: boolean;
+  github_login_configured: boolean;
+  database: string;
+};
+
+export type ProjectPipelineConfig = {
+  main_branch: string;
+  agent: string;
+  auto_merge: boolean;
+  merge_method: string;
+  ci_timeout_seconds: number;
+  ci_registration_grace_seconds: number;
+  command_timeout_seconds: number;
+  implementation_attempts: number;
+  verification_attempts: number;
+  review_attempts: number;
+  ci_attempts: number;
+  external_attempts: number;
+  external_backoff_seconds: number;
+  planner_attempts: number;
+  planner_enabled: boolean;
+  planner_context_classes: string[];
+  setup_commands: Record<string, string>;
+  setup_auto: boolean;
+  quality_commands: Record<string, string>;
+  security_commands: Record<string, string>;
+  discovery_max_candidates: number;
+  discovery_max_new_issues: number;
+  discovery_max_auto_implement: number;
+  discovery_max_risk: string;
+  discovery_max_context_class: string;
+  discovery_attempts: number;
+};
+
+export type ProjectConfig = {
+  source: "local" | "github" | "unavailable";
+  editable: boolean;
+  config: ProjectPipelineConfig;
+  warning?: string | null;
+};
+
+export type ProjectConfigPatch = Partial<ProjectPipelineConfig>;

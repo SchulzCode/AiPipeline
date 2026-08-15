@@ -8,22 +8,28 @@ The control center is not the engineering agent. It submits intent and displays 
 
 ### Web (`web/`)
 
-Next.js App Router UI. It contains no Git, merge, or agent-execution logic. It calls FastAPI with cookie credentials and subscribes to per-task SSE streams.
+Next.js App Router UI. It contains no Git, merge, or agent-execution logic. It calls FastAPI with cookie credentials and subscribes to per-task SSE streams. See `docs/DESIGN_SYSTEM.md` for the visual/interaction design system (tokens, status semantics, motion policy) established alongside these views.
 
-Views in v1.0:
+Views in v1.1 (issue #21 overhaul):
 
-- project dashboard;
-- add project;
-- project detail + prompt input;
-- open GitHub issues + run action;
-- feature discovery launch action (when the project has a GitHub repository);
-- task detail / pipeline timeline / token count;
-- discovery task detail: ranked candidates, duplicates, created issues, and handoff task status (in place of the pipeline timeline);
-- non-secret runtime settings.
+- **Overview** (`/`) — cross-project operations dashboard: "Happening now" (active tasks across all projects), "Needs attention" (blocked/failed/needs-input tasks), stat tiles, and a searchable/filterable/sortable project grid. Replaces the v1.0 flat project list.
+- **Add project** (`/projects/new`).
+- **Project workspace** (`/projects/[id]`) — project identity, an "Active now" banner when a task is running, the prompt-task form, feature discovery launch action, a filterable/searchable task list, and open GitHub issues with a "Run with AIpipe" action.
+- **Project settings** (`/projects/[id]/settings`) — typed, validated UI over the project's `.ai/config.yml` (agent/model, branch, merge behavior, planner policy, retry budgets, timeouts, discovery limits, setup/quality/security commands). Backed by `GET`/`PATCH /projects/{id}/config` and, for the agent/model fields specifically, `PATCH /projects/{id}` (see below). Never exposes secrets.
+- **Task detail** (`/tasks/[id]`) — the pipeline lifecycle visualization (Routing → ... → Done, with completed/current/pending/skipped/failed states), current-activity card, blocker banner, checks/review/security/CI summary, human-readable activity timeline, and an expandable raw-events technical panel. Discovery-sourced tasks render the discovery-specific panel (ranked candidates, duplicates, created issues, handoff tasks) in place of the pipeline visualization, unchanged from v1.0.
+- **Tasks** (`/tasks`) — global cross-project task list with status/source/text filtering, backed by the new `GET /tasks` endpoint.
+- **Diagnostics** (`/diagnostics`) — system health (project/task counts by status, inferred active-worker count, GitHub App/login configuration presence, database backend), replacing the v1.0 raw-JSON settings page. Backed by `GET /system/health`.
 
 ### Control API (`src/aipipe/control/app.py`)
 
 FastAPI owns authentication, project/task CRUD, SSE, GitHub App discovery, and webhook ingestion. Long-running engineering work is never performed inside an HTTP request.
+
+Additive endpoints for the v1.1 UI overhaul (issue #21), all read-through the existing `ControlTask`/`Project` tables — no new tables:
+
+- `GET /tasks` — cross-project task listing (`status`/`project_id`/`source` filters, bounded `limit`) for the Overview and Tasks views. Enriches `TaskOut` with `project_name`/`project_agent`/`project_model` to avoid N+1 calls from the frontend.
+- `GET /system/health` — aggregated project/task counts by status, and an `active_workers` count inferred from distinct `claimed_by` values on non-terminal tasks with a heartbeat newer than `worker_stale_seconds`. This is inference from existing task state, not a real worker/process registry — the UI must present it as such.
+- `GET`/`PATCH /projects/{id}/config` — typed read/write of the project's `.ai/config.yml`, via `src/aipipe/control/project_config.py`. For `local_path` projects this reads/writes the file directly; for GitHub-backed projects it uses the GitHub Contents API (`GitHubAppAuth.get_contents`/`put_contents` in `github_app.py`) and **commits directly to the project's default branch — no PR, no review gate** (this is operational pipeline config, not agent-generated code, so it intentionally bypasses the code-change gates). Patches merge into the existing raw YAML document (unknown keys and other top-level sections are preserved; YAML comments are not, since `yaml.safe_dump` doesn't round-trip them). `aipipe.config.PipelineConfig` is reused as the source of truth via two new pure functions, `merge_config_layers`/`config_from_merged`, extracted from `load_config` — the control plane never forks the config schema.
+- `PATCH /projects/{id}` — updates a project's `agent`/`model`/`name`/`enabled`. Exists separately from the config endpoint above because `Project.agent`/`Project.model` (the control-plane DB columns the executor actually reads, see `executor.py`) are distinct from the `agent` field inside `.ai/config.yml` (which only matters for the standalone CLI/core flow, not control-plane task execution) — exposing the YAML field as editable in the per-project settings UI would silently do nothing.
 
 ### Control state
 

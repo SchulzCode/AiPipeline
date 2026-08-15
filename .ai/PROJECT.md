@@ -12,8 +12,10 @@ multi-user use with GitHub App auth and webhook ingestion.
 - Python 3.11+ core (`src/aipipe`): stdlib + PyYAML only, no framework.
 - Optional `server`/`dev` extras add FastAPI, SQLAlchemy 2.x, httpx, PyJWT,
   itsdangerous for the control plane (`src/aipipe/control`).
-- Next.js 16 / React 19 / Tailwind 4 frontend in `web/` (App Router, no
-  separate test runner — verified via `next build` + `eslint`).
+- Next.js 16 / React 19 / Tailwind 4 frontend in `web/` (App Router), verified
+  via `next build` + `eslint` + `npm run test` (Vitest + React Testing
+  Library, added alongside the v1.1 UI overhaul — see `docs/DESIGN_SYSTEM.md`
+  and `.ai/DECISIONS.md` D-005).
 - SQLite by default for both the core `StateStore` (raw `sqlite3`) and the
   control-plane `Database` (SQLAlchemy); Postgres supported via
   `DATABASE_URL` for the control plane only.
@@ -47,11 +49,18 @@ multi-user use with GitHub App auth and webhook ingestion.
   events into the human-readable task-page feed).
 - `web/` is presentation-only: no Git/merge/agent logic, talks to the
   control API over cookies + SSE (`/tasks/{id}/stream`).
+  `web/lib/status.ts` is the single source of truth mapping every raw status
+  string (project/task/activity/discovery) to one of six shared tones
+  (`active`/`done`/`queued`/`attention`/`failed`/`idle`); add new statuses
+  there, not as a new local color map in a component — see
+  `docs/DESIGN_SYSTEM.md`.
 
 ## Testing and Build
 - `python -m pytest` (pytest + pytest-cov, `pythonpath=src`, `testpaths=tests`).
-- `web/`: `npm run lint` (eslint) and `npm run build` (`next build`, which
-  also runs the TypeScript compiler); no separate frontend test suite exists.
+- `web/`: `npm run lint` (eslint), `npm run build` (`next build`, which also
+  runs the TypeScript compiler), and `npm run test` (`vitest run`, jsdom
+  environment, `@testing-library/react`). Path alias `@/*` is mirrored in
+  `vitest.config.ts` — keep it in sync with `tsconfig.json` if it changes.
 - GitHub Actions CI is present and is the pipeline's own required-CI gate for
   its self-merged tasks.
 

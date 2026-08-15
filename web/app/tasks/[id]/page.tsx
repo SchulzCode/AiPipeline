@@ -3,20 +3,24 @@
 import Link from "next/link";
 import { useParams } from "next/navigation";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { API, api } from "@/lib/api";
-import { agentLabel } from "@/lib/format";
-import type { ActivityFeed, ActivityItem, ActivityStatus, Event, Project, Task } from "@/lib/types";
+import { ArrowLeft, ArrowSquareOut, CaretDown, CaretRight, GitBranch, WarningCircle } from "@phosphor-icons/react";
+import { api, streamUrl } from "@/lib/api";
+import { agentLabel, formatTimestamp, formatTokenCount } from "@/lib/format";
+import { activityTone, TONE_META, type Tone } from "@/lib/status";
+import type { ActivityFeed, ActivityItem, Event, Project, Task } from "@/lib/types";
 import { DiscoveryPanel } from "@/components/discovery-panel";
-import { StatusBadge } from "@/components/status-badge";
+import { TaskStatusBadge } from "@/components/ui/badge";
 import { TaskTimer } from "@/components/task-timer";
+import { PipelineStages } from "@/components/pipeline-stages";
+import { Card, CardBody, CardHeader } from "@/components/ui/card";
+import { ErrorBanner } from "@/components/ui/error-banner";
+import { Skeleton } from "@/components/ui/skeleton";
 
-const stages = ["ROUTING", "PREPARING", "DISCOVERY", "PLANNING", "IMPLEMENTING", "VERIFYING", "REVIEWING", "PR_OPEN", "CI", "MERGING", "POST_MERGE", "DONE"];
-
-const TONES: Record<ActivityStatus, string> = {
-  success: "border-emerald-500/30 bg-emerald-500/10 text-emerald-300",
-  warning: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-  error: "border-rose-500/30 bg-rose-500/10 text-rose-300",
-  info: "border-blue-400/30 bg-blue-400/10 text-blue-200",
+const BLOCKER_LABEL: Record<string, string> = {
+  BLOCKED: "blocked",
+  CANCELLED: "cancelled",
+  NEEDS_INPUT: "needs input",
+  FAILED: "failed",
 };
 
 export default function TaskPage() {
@@ -37,17 +41,20 @@ export default function TaskPage() {
   }, [id]);
 
   useEffect(() => {
-    api.task(id).then((t) => {
-      setTask(t);
-      api.project(t.project_id).then(setProject).catch(() => undefined);
-    }).catch((e) => setError(String(e)));
+    api
+      .task(id)
+      .then((t) => {
+        setTask(t);
+        api.project(t.project_id).then(setProject).catch(() => undefined);
+      })
+      .catch((e) => setError(String(e)));
     api.events(id).then(setEvents).catch(() => undefined);
     api.activity(id).then(setActivity).catch(() => undefined);
 
-    const stream = new EventSource(`${API}/tasks/${id}/stream`, { withCredentials: true });
+    const stream = new EventSource(streamUrl(id), { withCredentials: true });
     stream.addEventListener("task", (raw) => {
       const event = JSON.parse((raw as MessageEvent).data) as Event;
-      setEvents((old) => old.some((x) => x.id === event.id) ? old : [...old, event]);
+      setEvents((old) => (old.some((x) => x.id === event.id) ? old : [...old, event]));
       if (event.kind === "core:status") api.task(id).then(setTask).catch(() => undefined);
       refreshActivity();
     });
@@ -58,175 +65,212 @@ export default function TaskPage() {
     };
   }, [id, refreshActivity]);
 
-  const currentIndex = useMemo(() => {
-    if (!activity) return -1;
-    for (let i = activity.items.length - 1; i >= 0; i--) {
-      const idx = stages.indexOf(activity.items[i].category);
-      if (idx >= 0) return idx;
-    }
-    return -1;
-  }, [activity]);
+  if (!task && !error) {
+    return (
+      <div className="space-y-6">
+        <Skeleton className="h-10 w-2/3" />
+        <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
+          {Array.from({ length: 5 }).map((_, i) => (
+            <Skeleton key={i} className="h-16 w-full" />
+          ))}
+        </div>
+        <Skeleton className="h-40 w-full" />
+      </div>
+    );
+  }
 
-  if (!task) return <div className="text-zinc-500">Loading task… {error}</div>;
+  if (!task) return <ErrorBanner message={error} />;
 
-  const stoppedEarly = ["BLOCKED", "FAILED", "CANCELLED", "NEEDS_INPUT"].includes(task.status);
   const repo = project?.repository_full_name;
+  const totalTokens = task.input_tokens + task.output_tokens;
 
   return (
-    <div>
-      <Link href={`/projects/${task.project_id}`} className="text-sm text-zinc-500 hover:text-white">← Project</Link>
+    <div className="animate-enter space-y-6">
+      <Link href={`/projects/${task.project_id}`} className="inline-flex items-center gap-1.5 text-xs text-fg-muted hover:text-fg">
+        <ArrowLeft size={13} aria-hidden="true" />
+        Project
+      </Link>
 
-      {/* 1. Status + timer */}
-      <div className="mt-4 flex flex-wrap items-start justify-between gap-4">
-        <div>
-          <div className="text-sm text-zinc-500">{task.core_task_id || task.id}</div>
-          <h1 className="mt-1 max-w-4xl text-3xl font-semibold">{task.title || task.prompt}</h1>
+      <div className="flex flex-wrap items-start justify-between gap-4">
+        <div className="min-w-0">
+          <p className="font-mono text-xs text-fg-faint">{task.core_task_id || task.id}</p>
+          <h1 className="mt-1 max-w-4xl text-xl font-semibold tracking-tight text-fg">{task.title || task.prompt}</h1>
         </div>
-        <StatusBadge status={task.status} />
+        <TaskStatusBadge status={task.status} />
       </div>
 
-      <div className="mt-6 grid gap-3 sm:grid-cols-2 lg:grid-cols-4">
+      {error ? <ErrorBanner message={error} /> : null}
+
+      <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-5">
         <Info label="Agent" value={project ? agentLabel(project) : "Loading…"} />
         <Info label="Risk" value={task.risk || "Pending"} />
-        <Info
-          label="Runtime"
-          value={<TaskTimer startedAt={task.started_at} endedAt={task.completed_at} notStartedLabel="Not started yet" />}
-        />
+        <Info label="Runtime" value={<TaskTimer startedAt={task.started_at} endedAt={task.completed_at} notStartedLabel="Not started yet" />} />
         <Info
           label="Branch / PR"
           value={
             <span className="flex flex-col gap-0.5">
-              <span className="truncate">{task.branch ? (repo ? <a className="hover:text-white underline decoration-white/20" href={`https://github.com/${repo}/tree/${task.branch}`} target="_blank" rel="noreferrer">{task.branch}</a> : task.branch) : "No branch yet"}</span>
-              <span>{task.pr_number ? (repo ? <a className="hover:text-white underline decoration-white/20" href={`https://github.com/${repo}/pull/${task.pr_number}`} target="_blank" rel="noreferrer">PR #{task.pr_number}</a> : `PR #${task.pr_number}`) : "No pull request yet"}</span>
+              <span className="flex items-center gap-1 truncate">
+                <GitBranch size={12} className="shrink-0 text-fg-faint" aria-hidden="true" />
+                {task.branch ? (
+                  repo ? (
+                    <a className="truncate hover:text-accent" href={`https://github.com/${repo}/tree/${task.branch}`} target="_blank" rel="noreferrer">
+                      {task.branch}
+                    </a>
+                  ) : (
+                    task.branch
+                  )
+                ) : (
+                  "No branch yet"
+                )}
+              </span>
+              <span>
+                {task.pr_number ? (
+                  repo ? (
+                    <a className="inline-flex items-center gap-1 hover:text-accent" href={`https://github.com/${repo}/pull/${task.pr_number}`} target="_blank" rel="noreferrer">
+                      PR #{task.pr_number}
+                      <ArrowSquareOut size={11} aria-hidden="true" />
+                    </a>
+                  ) : (
+                    `PR #${task.pr_number}`
+                  )
+                ) : (
+                  "No pull request yet"
+                )}
+              </span>
             </span>
           }
         />
+        <Info label="Tokens" value={<span className="tabular-nums">{formatTokenCount(totalTokens)}</span>} />
       </div>
 
-      {/* Blocked / failed / cancelled / needs-input banner */}
-      {activity?.blocker && (
-        <section className={`mt-6 rounded-2xl border p-5 ${["BLOCKED", "NEEDS_INPUT"].includes(task.status) ? "border-amber-400/30 bg-amber-400/10" : "border-rose-500/30 bg-rose-500/10"}`}>
-          <h2 className={`font-semibold ${["BLOCKED", "NEEDS_INPUT"].includes(task.status) ? "text-amber-200" : "text-rose-200"}`}>
-            Task {task.status === "BLOCKED" ? "blocked" : task.status === "CANCELLED" ? "cancelled" : task.status === "NEEDS_INPUT" ? "needs input" : "failed"}
-          </h2>
-          {activity.blocker.last_phase && (
-            <div className="mt-1 text-sm text-zinc-300">Last completed step: {activity.blocker.last_phase}</div>
-          )}
-          <pre className="mt-2 whitespace-pre-wrap break-words text-sm text-zinc-100/80">{activity.blocker.reason}</pre>
-        </section>
-      )}
+      {activity?.blocker ? (
+        <Card className={["BLOCKED", "NEEDS_INPUT"].includes(task.status) ? "border-status-attention/30 bg-status-attention/[0.06]" : "border-status-failed/30 bg-status-failed/[0.06]"}>
+          <CardBody>
+            <div className="flex items-center gap-2">
+              <WarningCircle size={18} weight="bold" className={["BLOCKED", "NEEDS_INPUT"].includes(task.status) ? "text-status-attention" : "text-status-failed"} aria-hidden="true" />
+              <h2 className={`text-sm font-semibold ${["BLOCKED", "NEEDS_INPUT"].includes(task.status) ? "text-status-attention" : "text-status-failed"}`}>
+                Task {BLOCKER_LABEL[task.status] ?? "stopped"}
+                {task.failure_category ? ` · ${task.failure_category}` : ""}
+              </h2>
+            </div>
+            {activity.blocker.last_phase ? <p className="mt-2 text-sm text-fg-muted">Last completed step: {activity.blocker.last_phase}</p> : null}
+            <p className="mt-2 whitespace-pre-wrap break-words text-sm text-fg">{activity.blocker.reason}</p>
+          </CardBody>
+        </Card>
+      ) : null}
 
-      {/* 2. Current activity */}
-      {activity?.current && (
-        <section className="mt-6 rounded-2xl border border-blue-400/25 bg-blue-400/[0.06] p-5">
-          <div className="text-xs font-semibold uppercase tracking-wider text-blue-300">Currently</div>
-          <div className="mt-1 text-lg font-semibold">{activity.current.title}</div>
-          <div className="mt-1 max-w-3xl text-sm text-zinc-300">{activity.current.summary}</div>
-          <div className="mt-4 flex flex-wrap gap-x-6 gap-y-2 text-sm text-zinc-400">
-            <span>Agent: <span className="text-zinc-200">{activity.current.agent_label}</span></span>
-            <span>Phase duration: <span className="text-zinc-200"><TaskTimer startedAt={activity.current.started_at} /></span></span>
-            {activity.current.next_step && <span>Next: <span className="text-zinc-200">{activity.current.next_step}</span></span>}
-          </div>
-        </section>
-      )}
+      {activity?.current ? (
+        <Card className="border-status-active/30 bg-status-active/[0.04]">
+          <CardBody>
+            <p className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-status-active">
+              <span className="h-1.5 w-1.5 rounded-full bg-status-active animate-live-pulse" aria-hidden="true" />
+              Currently
+            </p>
+            <p className="mt-1.5 text-base font-semibold text-fg">{activity.current.title}</p>
+            {activity.current.summary ? <p className="mt-1 max-w-3xl text-sm text-fg-muted">{activity.current.summary}</p> : null}
+            <div className="mt-3 flex flex-wrap gap-x-6 gap-y-1.5 text-xs text-fg-muted">
+              <span>
+                Agent role: <span className="text-fg">{activity.current.agent_label}</span>
+              </span>
+              <span>
+                Phase runtime: <span className="tabular-nums text-fg"><TaskTimer startedAt={activity.current.started_at} /></span>
+              </span>
+              {activity.current.next_step ? (
+                <span>
+                  Next: <span className="text-fg">{activity.current.next_step}</span>
+                </span>
+              ) : null}
+            </div>
+          </CardBody>
+        </Card>
+      ) : null}
 
-      {/* 3. Progress / lifecycle stages, or the discovery-specific panel */}
       {task.source === "discovery" ? (
         <DiscoveryPanel taskId={task.id} />
       ) : (
-        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
-          <h2 className="font-semibold">Pipeline</h2>
-          <div className="mt-5 grid gap-2 md:grid-cols-4 xl:grid-cols-6">
-            {stages.map((stage, index) => {
-              const done = task.status === "DONE" || index < currentIndex;
-              const active = index === currentIndex && !done;
-              const stoppedHere = active && stoppedEarly;
-              const stoppedWarn = stoppedHere && task.status === "NEEDS_INPUT";
-              const tone = done
-                ? "border-emerald-500/25 bg-emerald-500/10 text-emerald-300"
-                : stoppedWarn
-                  ? "border-amber-400/30 bg-amber-400/10 text-amber-200"
-                  : stoppedHere
-                    ? "border-rose-500/30 bg-rose-500/10 text-rose-300"
-                    : active
-                      ? "border-blue-400/40 bg-blue-400/10 text-blue-200"
-                      : "border-white/10 text-zinc-600";
-              const marker = done ? "✓ " : stoppedHere ? "✕ " : active ? "● " : "○ ";
-              return <div key={stage} className={`rounded-xl border p-3 text-xs font-semibold ${tone}`}>{marker}{stage}</div>;
-            })}
-          </div>
-        </section>
+        <Card>
+          <CardHeader title="Pipeline" description="Routing through implementation, review, CI, and merge." />
+          <CardBody>
+            <PipelineStages activity={activity} taskStatus={task.status} />
+          </CardBody>
+        </Card>
       )}
 
-      {/* 3b. Planner output */}
-      {activity?.checks.plan && (
-        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
-          <h2 className="font-semibold">Implementation plan</h2>
-          <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-sm text-zinc-300">{activity.checks.plan.plan}</pre>
-        </section>
-      )}
+      {activity?.checks.plan ? (
+        <Card>
+          <CardHeader title="Implementation plan" />
+          <CardBody>
+            <pre className="max-h-96 overflow-auto whitespace-pre-wrap break-words font-mono text-xs leading-relaxed text-fg-muted">{activity.checks.plan.plan}</pre>
+          </CardBody>
+        </Card>
+      ) : null}
 
-      {/* 4. Activity timeline */}
-      <section className="mt-6">
-        <h2 className="mb-3 text-lg font-semibold">Activity</h2>
-        <div className="space-y-3">
-          {activity?.items.slice().reverse().map((item, index) => <ActivityCard key={`${item.timestamp}-${index}`} item={item} />)}
-          {activity && !activity.items.length && <div className="rounded-2xl border border-white/10 bg-black/30 p-5 text-zinc-500">Waiting for the pipeline to start…</div>}
-          {!activity && <div className="rounded-2xl border border-white/10 bg-black/30 p-5 text-zinc-500">Loading activity…</div>}
-        </div>
-      </section>
-
-      {/* 5. Checks / review / CI summary */}
-      {activity && (activity.checks.checks.length > 0 || activity.checks.review || activity.checks.security_review || activity.checks.ci) && (
-        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
-          <h2 className="font-semibold">Checks &amp; review</h2>
-          <div className="mt-4 grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
-            {activity.checks.checks.length > 0 && (
+      {activity && (activity.checks.checks.length > 0 || activity.checks.review || activity.checks.security_review || activity.checks.ci) ? (
+        <Card>
+          <CardHeader title="Checks & review" />
+          <CardBody className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+            {activity.checks.checks.length > 0 ? (
               <div>
-                <div className="text-xs uppercase tracking-wider text-zinc-600">Local checks</div>
+                <p className="text-xs font-medium text-fg-muted">Local checks</p>
                 <div className="mt-2 flex flex-wrap gap-1.5">
                   {activity.checks.checks.map((check) => (
-                    <span key={`${check.type}:${check.name}`} className={`rounded-full border px-2 py-0.5 text-xs ${check.status === "PASS" ? TONES.success : TONES.error}`}>{check.name}</span>
+                    <ToneChip key={`${check.type}:${check.name}`} tone={check.status === "PASS" ? "done" : "failed"} label={check.name} />
                   ))}
                 </div>
               </div>
-            )}
-            {activity.checks.review && <SummaryTile label="Review" status={activity.checks.review.status} value={activity.checks.review.result} />}
-            {activity.checks.security_review && <SummaryTile label="Security review" status={activity.checks.security_review.status} value={activity.checks.security_review.result} />}
-            {activity.checks.ci && (
+            ) : null}
+            {activity.checks.review ? <SummaryTile label="Review" tone={activityTone(activity.checks.review.status)} value={activity.checks.review.result} /> : null}
+            {activity.checks.security_review ? <SummaryTile label="Security review" tone={activityTone(activity.checks.security_review.status)} value={activity.checks.security_review.result} /> : null}
+            {activity.checks.ci ? (
               <SummaryTile
                 label="CI"
-                status={activity.checks.ci.failed > 0 ? "warning" : activity.checks.ci.total === 0 ? "info" : "success"}
+                tone={activity.checks.ci.failed > 0 ? "attention" : activity.checks.ci.total === 0 ? "active" : "done"}
                 value={`${activity.checks.ci.passed}/${activity.checks.ci.total} passed`}
               />
-            )}
-          </div>
-        </section>
-      )}
+            ) : null}
+          </CardBody>
+        </Card>
+      ) : null}
 
-      {/* 6. Technical details */}
-      <section className="mt-6">
-        <button
-          type="button"
-          onClick={() => setShowTechnical((v) => !v)}
-          className="text-sm font-semibold text-zinc-400 hover:text-white"
-        >
-          {showTechnical ? "▾" : "▸"} Technical details ({events.length} raw event{events.length === 1 ? "" : "s"}, {(task.input_tokens + task.output_tokens).toLocaleString()} tokens)
+      <section aria-labelledby="activity-heading">
+        <h2 id="activity-heading" className="mb-3 text-sm font-semibold text-fg">
+          Activity
+        </h2>
+        <div className="space-y-2">
+          {activity?.items
+            .slice()
+            .reverse()
+            .map((item, index) => <ActivityCard key={`${item.timestamp}-${index}`} item={item} />)}
+          {activity && activity.items.length === 0 ? <Card className="p-5 text-sm text-fg-muted">Waiting for the pipeline to start…</Card> : null}
+          {!activity ? <Skeleton className="h-24 w-full" /> : null}
+        </div>
+      </section>
+
+      <section>
+        <button type="button" onClick={() => setShowTechnical((v) => !v)} className="inline-flex items-center gap-1.5 text-sm font-medium text-fg-muted hover:text-fg">
+          {showTechnical ? <CaretDown size={13} aria-hidden="true" /> : <CaretRight size={13} aria-hidden="true" />}
+          Technical details ({events.length} raw event{events.length === 1 ? "" : "s"}, {totalTokens.toLocaleString()} tokens)
         </button>
-        {showTechnical && (
-          <div className="mt-3 overflow-hidden rounded-2xl border border-white/10 bg-black/30">
-            {events.slice().reverse().map((event) => (
-              <div key={event.id} className="grid gap-2 border-b border-white/[0.06] px-4 py-3 last:border-0 md:grid-cols-[12rem_1fr]">
-                <div>
-                  <div className="text-xs font-semibold text-blue-200">{event.kind}</div>
-                  <div className="mt-1 text-xs text-zinc-600">{new Date(event.created_at).toLocaleString()}</div>
-                </div>
-                <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs text-zinc-400">{event.detail || ""}</pre>
-              </div>
-            ))}
-            {!events.length && <div className="p-5 text-zinc-500">Waiting for worker events…</div>}
-          </div>
-        )}
+        {showTechnical ? (
+          <Card className="mt-3 overflow-hidden">
+            {events.length === 0 ? (
+              <p className="p-5 text-sm text-fg-muted">Waiting for worker events…</p>
+            ) : (
+              events
+                .slice()
+                .reverse()
+                .map((event) => (
+                  <div key={event.id} className="grid gap-2 border-b border-border px-4 py-3 last:border-0 md:grid-cols-[12rem_1fr]">
+                    <div>
+                      <p className="font-mono text-xs font-medium text-status-active">{event.kind}</p>
+                      <p className="mt-1 text-xs text-fg-faint">{formatTimestamp(event.created_at)}</p>
+                    </div>
+                    <pre className="max-h-48 overflow-auto whitespace-pre-wrap break-words font-mono text-xs text-fg-muted">{event.detail || ""}</pre>
+                  </div>
+                ))
+            )}
+          </Card>
+        ) : null}
       </section>
     </div>
   );
@@ -234,39 +278,46 @@ export default function TaskPage() {
 
 function ActivityCard({ item }: { item: ActivityItem }) {
   return (
-    <div className="rounded-2xl border border-white/10 bg-white/[0.03] p-4">
+    <Card className="p-4">
       <div className="flex flex-wrap items-start justify-between gap-2">
-        <div className="font-semibold">{item.title}</div>
-        <div className="flex items-center gap-2 text-xs text-zinc-500">
-          {typeof item.duration_seconds === "number" && <span>{formatShortDuration(item.duration_seconds)}</span>}
-          <span>{new Date(item.timestamp).toLocaleString()}</span>
+        <p className="text-sm font-semibold text-fg">{item.title}</p>
+        <div className="flex shrink-0 items-center gap-2 text-xs text-fg-faint">
+          {typeof item.duration_seconds === "number" ? <span className="tabular-nums">{formatShortDuration(item.duration_seconds)}</span> : null}
+          <span>{formatTimestamp(item.timestamp)}</span>
         </div>
       </div>
-      {item.summary && <div className="mt-1 text-sm text-zinc-400">{item.summary}</div>}
-      {item.result && (
-        <div className={`mt-2 inline-block rounded-lg border px-2.5 py-1 text-xs ${TONES[item.status]}`}>
-          Result: {item.result}
+      {item.summary ? <p className="mt-1 text-sm text-fg-muted">{item.summary}</p> : null}
+      {item.result ? (
+        <div className="mt-2">
+          <ToneChip tone={activityTone(item.status)} label={`Result: ${item.result}`} />
         </div>
-      )}
-      {item.next_step && <div className="mt-2 text-xs text-zinc-500">Next: {item.next_step}</div>}
-    </div>
+      ) : null}
+      {item.next_step ? <p className="mt-2 text-xs text-fg-faint">Next: {item.next_step}</p> : null}
+    </Card>
   );
 }
 
-function SummaryTile({ label, status, value }: { label: string; status: ActivityStatus; value: string }) {
+function ToneChip({ tone, label }: { tone: Tone; label: string }) {
+  const meta = TONE_META[tone];
+  return <span className={`inline-block rounded-md border px-2 py-1 text-xs ${meta.bg} ${meta.border} ${meta.text}`}>{label}</span>;
+}
+
+function SummaryTile({ label, tone, value }: { label: string; tone: Tone; value: string }) {
   return (
     <div>
-      <div className="text-xs uppercase tracking-wider text-zinc-600">{label}</div>
-      <div className={`mt-2 inline-block rounded-lg border px-2.5 py-1 text-xs ${TONES[status]}`}>{value}</div>
+      <p className="text-xs font-medium text-fg-muted">{label}</p>
+      <div className="mt-2">
+        <ToneChip tone={tone} label={value} />
+      </div>
     </div>
   );
 }
 
 function Info({ label, value }: { label: string; value: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-white/10 bg-white/[0.03] p-4">
-      <div className="text-xs uppercase tracking-wider text-zinc-600">{label}</div>
-      <div className="mt-1 font-medium">{value}</div>
+    <div className="rounded-md border border-border bg-surface p-3.5">
+      <p className="text-xs font-medium text-fg-muted">{label}</p>
+      <div className="mt-1 text-sm text-fg">{value}</div>
     </div>
   );
 }

@@ -59,7 +59,7 @@ def test_control_api_task_activity_is_human_readable_and_events_stay_raw(monkeyp
         assert body["current"]["title"] == "Queued"
         assert body["current"]["agent_label"] == "Claude · sonnet"
         assert body["blocker"] is None
-        assert body["checks"] == {"checks": [], "review": None, "security_review": None, "ci": None}
+        assert body["checks"] == {"checks": [], "review": None, "security_review": None, "ci": None, "plan": None}
 
 
 def test_control_api_task_activity_not_found(monkeypatch, tmp_path):
@@ -266,3 +266,181 @@ def test_control_api_handoff_tasks_lists_linked_tasks(monkeypatch, tmp_path):
         assert body[0]["id"] == handoff_id
         assert body[0]["source_reference"] == "42"
         assert body[0]["discovery_task_id"] == tid
+
+
+def _client(monkeypatch, tmp_path):
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'api.db'}")
+    monkeypatch.setenv("AIPIPE_DEV_AUTH", "true")
+    monkeypatch.setenv("AIPIPE_REPOS_ROOT", str(tmp_path / "repos"))
+    monkeypatch.setenv("AIPIPE_SESSION_SECRET", "x" * 40)
+    import aipipe.control.app as app_module
+    app_module = importlib.reload(app_module)
+    return app_module, TestClient(app_module.app)
+
+
+def test_control_api_project_patch_updates_agent_and_model(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    app_module, client = _client(monkeypatch, tmp_path)
+    with client:
+        project = client.post("/projects", json={"name": "Demo", "local_path": str(repo), "agent": "codex"}).json()
+        pid = project["id"]
+
+        renamed = client.patch(f"/projects/{pid}", json={"name": "Renamed"})
+        assert renamed.status_code == 200
+        assert renamed.json()["name"] == "Renamed"
+        assert renamed.json()["agent"] == "codex"
+
+        switched = client.patch(f"/projects/{pid}", json={"agent": "claude", "model": "sonnet"})
+        assert switched.status_code == 200
+        assert switched.json()["agent"] == "claude"
+        assert switched.json()["model"] == "sonnet"
+
+        rejected = client.patch(f"/projects/{pid}", json={"model": "not-a-real-model"})
+        assert rejected.status_code == 422
+
+        missing = client.patch("/projects/does-not-exist", json={"name": "x"})
+        assert missing.status_code == 404
+
+
+def test_control_api_global_tasks_lists_across_projects_with_project_context(monkeypatch, tmp_path):
+    repo_a = tmp_path / "repo-a"; repo_a.mkdir()
+    repo_b = tmp_path / "repo-b"; repo_b.mkdir()
+    subprocess.run(["git", "init"], cwd=repo_a, check=True, capture_output=True)
+    subprocess.run(["git", "init"], cwd=repo_b, check=True, capture_output=True)
+    app_module, client = _client(monkeypatch, tmp_path)
+    with client:
+        pa = client.post("/projects", json={"name": "Alpha", "local_path": str(repo_a), "agent": "codex"}).json()["id"]
+        pb = client.post("/projects", json={"name": "Beta", "local_path": str(repo_b), "agent": "claude", "model": "sonnet"}).json()["id"]
+        ta = client.post(f"/projects/{pa}/tasks", json={"prompt": "Task in Alpha"}).json()["id"]
+        tb = client.post(f"/projects/{pb}/tasks", json={"prompt": "Task in Beta"}).json()["id"]
+
+        all_tasks = client.get("/tasks").json()
+        ids = {t["id"] for t in all_tasks}
+        assert {ta, tb} <= ids
+        by_id = {t["id"]: t for t in all_tasks}
+        assert by_id[ta]["project_name"] == "Alpha"
+        assert by_id[tb]["project_name"] == "Beta"
+        assert by_id[tb]["project_agent"] == "claude"
+        assert by_id[tb]["project_model"] == "sonnet"
+
+        scoped = client.get("/tasks", params={"project_id": pa}).json()
+        assert {t["id"] for t in scoped} == {ta}
+
+        by_status = client.get("/tasks", params={"status": "queued"}).json()
+        assert {ta, tb} <= {t["id"] for t in by_status}
+
+        none_match = client.get("/tasks", params={"status": "done"}).json()
+        assert none_match == []
+
+
+def test_control_api_system_health_reports_counts_and_no_fabricated_workers(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    app_module, client = _client(monkeypatch, tmp_path)
+    with client:
+        project = client.post("/projects", json={"name": "Demo", "local_path": str(repo), "agent": "codex"}).json()
+        client.post(f"/projects/{project['id']}/tasks", json={"prompt": "Do a thing"})
+
+        health = client.get("/system/health")
+        assert health.status_code == 200
+        body = health.json()
+        assert body["projects_total"] == 1
+        assert body["projects_by_status"] == {"IDLE": 1}
+        assert body["tasks_by_status"] == {"QUEUED": 1}
+        assert body["active_tasks"] == 1
+        # Nothing has claimed the task yet, so no workers should be reported.
+        assert body["active_workers"] == 0
+        assert body["stale_tasks"] == 0
+        assert body["dev_auth"] is True
+        assert body["database"] == "sqlite"
+
+
+def test_control_api_system_health_counts_fresh_and_stale_claims(monkeypatch, tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    from aipipe.control.models import ControlTask
+
+    repo = tmp_path / "repo"; repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    monkeypatch.setenv("AIPIPE_WORKER_STALE_SECONDS", "60")
+    app_module, client = _client(monkeypatch, tmp_path)
+    with client:
+        project = client.post("/projects", json={"name": "Demo", "local_path": str(repo), "agent": "codex"}).json()
+        fresh = client.post(f"/projects/{project['id']}/tasks", json={"prompt": "Fresh"}).json()["id"]
+        stale = client.post(f"/projects/{project['id']}/tasks", json={"prompt": "Stale"}).json()["id"]
+
+        with app_module.database.session() as db:
+            db.get(ControlTask, fresh).claimed_by = "worker-1"
+            db.get(ControlTask, fresh).heartbeat_at = datetime.now(timezone.utc)
+            db.get(ControlTask, stale).claimed_by = "worker-2"
+            db.get(ControlTask, stale).heartbeat_at = datetime.now(timezone.utc) - timedelta(seconds=600)
+
+        body = client.get("/system/health").json()
+        assert body["active_workers"] == 1
+        assert body["stale_tasks"] == 1
+
+
+def test_control_api_project_config_round_trips_for_local_project(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    app_module, client = _client(monkeypatch, tmp_path)
+    with client:
+        project = client.post("/projects", json={"name": "Demo", "local_path": str(repo), "agent": "codex"}).json()
+        pid = project["id"]
+
+        config = client.get(f"/projects/{pid}/config")
+        assert config.status_code == 200
+        body = config.json()
+        assert body["source"] == "local"
+        assert body["editable"] is True
+        assert body["config"]["auto_merge"] is True
+        assert body["config"]["discovery_max_auto_implement"] == 0
+
+        patched = client.patch(f"/projects/{pid}/config", json={"auto_merge": False, "ci_attempts": 5})
+        assert patched.status_code == 200
+        patched_body = patched.json()
+        assert patched_body["config"]["auto_merge"] is False
+        assert patched_body["config"]["ci_attempts"] == 5
+        # Untouched fields survive the patch.
+        assert patched_body["config"]["agent"] == "codex"
+
+        on_disk = (repo / ".ai" / "config.yml").read_text(encoding="utf-8")
+        assert "auto_merge: false" in on_disk
+
+        refetched = client.get(f"/projects/{pid}/config").json()
+        assert refetched["config"]["auto_merge"] is False
+        assert refetched["config"]["ci_attempts"] == 5
+
+
+def test_control_api_project_config_rejects_invalid_values(monkeypatch, tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    app_module, client = _client(monkeypatch, tmp_path)
+    with client:
+        project = client.post("/projects", json={"name": "Demo", "local_path": str(repo), "agent": "codex"}).json()
+        pid = project["id"]
+
+        bad = client.patch(f"/projects/{pid}/config", json={"discovery_max_risk": "EXTREME"})
+        assert bad.status_code == 422
+
+        bad_attempts = client.patch(f"/projects/{pid}/config", json={"ci_attempts": 0})
+        assert bad_attempts.status_code == 422
+
+
+def test_control_api_project_config_unavailable_without_local_path_or_repo(monkeypatch, tmp_path):
+    app_module, client = _client(monkeypatch, tmp_path)
+    with client:
+        project = client.post("/projects", json={"name": "GH Demo", "repository_full_name": "octo/demo", "agent": "codex"}).json()
+        pid = project["id"]
+
+        config = client.get(f"/projects/{pid}/config")
+        assert config.status_code == 200
+        body = config.json()
+        # No installation_id was set, so GitHub-backed config reads are unavailable.
+        assert body["source"] == "unavailable"
+        assert body["editable"] is False
+        assert body["warning"]
+
+        patch = client.patch(f"/projects/{pid}/config", json={"auto_merge": False})
+        assert patch.status_code == 400
