@@ -9,6 +9,9 @@ from datetime import datetime, timedelta, timezone
 
 from sqlalchemy import select
 
+from aipipe.models import FailureCategory
+from aipipe.reliability import build_identity
+
 from .config import load_settings
 from .db import Database
 from .executor import TaskExecutor
@@ -21,14 +24,18 @@ class Worker:
         self.database = database
         self.settings = database.settings
         self.worker_id = worker_id or f"{socket.gethostname()}:{os.getpid()}"
+        self.build = build_identity()
         self.executor = TaskExecutor(database, self.settings)
 
     def recover_stale(self) -> int:
-        """Fail tasks whose owning worker stopped heartbeating and release their project.
+        """Pause tasks whose owning worker stopped heartbeating.
 
-        V1 deliberately fails closed instead of guessing how to resume a partially-pushed
-        Git/PR state. The operator can resubmit after inspecting the recorded event.
+        The task is left BLOCKED rather than discarded or automatically
+        restarted. Existing worktree/branch state is preserved for the
+        resumable-task flow (#9), while duplicate Git/PR side effects are
+        avoided until a safe checkpoint-aware resume implementation takes over.
         """
+
         cutoff = datetime.now(timezone.utc) - timedelta(seconds=self.settings.worker_stale_seconds)
         recovered = 0
         with self.database.session() as db:
@@ -42,10 +49,15 @@ class Worker:
             ).all())
             for task in rows:
                 owner = task.claimed_by
-                task.status = "FAILED"
-                task.error = f"Worker heartbeat expired ({owner}); task was not auto-resumed to avoid duplicating Git/PR side effects."
+                task.status = "BLOCKED"
+                task.error = (
+                    f"Worker heartbeat expired ({owner}); existing task state was preserved. "
+                    "Resume from a safe checkpoint instead of creating a duplicate task."
+                )
+                task.failure_category = FailureCategory.ENVIRONMENT.value
                 task.completed_at = datetime.now(timezone.utc)
                 task.claimed_by = None
+                task.heartbeat_at = None
                 add_event(db, task.id, "WORKER_LOST", task.error)
                 project = db.get(Project, task.project_id)
                 if project:
@@ -68,14 +80,15 @@ class Worker:
                 project = db.scalar(project_stmt)
                 if not project or project.status != "IDLE" or not project.enabled:
                     continue
-                # Project row is locked in PostgreSQL. Marking it BUSY here prevents a
-                # second worker from claiming another task for the same repository.
                 project.status = "BUSY"
                 task.status = "CLAIMED"
                 task.claimed_by = self.worker_id
+                task.worker_build = self.build
                 task.started_at = task.started_at or now
                 task.heartbeat_at = now
-                add_event(db, task.id, "CLAIMED", self.worker_id)
+                task.error = None
+                task.failure_category = None
+                add_event(db, task.id, "CLAIMED", f"{self.worker_id} build={self.build}")
                 return task.id
         return None
 
@@ -98,7 +111,7 @@ class Worker:
         try:
             self.executor.execute(task_id)
         except Exception:
-            # Executor records a terminal state and diagnostic event.
+            # Executor records a terminal/recoverable state and diagnostic event.
             pass
         finally:
             stop.set()
