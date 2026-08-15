@@ -56,11 +56,14 @@ The core emits observations into the control database; the API exposes them over
 
 Roles used by v1.0:
 
+- PLANNER (DEEP context, or another configured `planning.context_classes` threshold; read-only)
 - IMPLEMENTER
 - REVIEWER (MEDIUM/HIGH)
 - SECURITY_REVIEWER (HIGH)
 
 Routing is deterministic to avoid a dedicated LLM call. Durable project knowledge is updated by the implementer only when relevant, so there is no always-on knowledge-agent run.
+
+The Planner is conditional on `context_class`, not `risk` — the two stay independent: an architecturally complex but low-risk task can still get a plan, while a high-risk small change can require security review without one. It runs once, during `PLANNING`, in the same read-only sandbox as REVIEWER/SECURITY_REVIEWER (`agents/base.py:READ_ONLY_ROLES`) and is bounded by `retries.planner` (default 2) with no code-mutation retry loop — a failed Planner run blocks the task (`PLANNING_FAILURE`) rather than silently skipping planning. Its output is stored as a `PLAN` event and threaded into the Implementer's context under an `# Implementation Plan` section.
 
 ### Context builder
 

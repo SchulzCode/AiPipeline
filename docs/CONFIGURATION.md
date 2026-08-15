@@ -46,6 +46,11 @@ retries:
   verification: 3
   review: 2
   ci: 2
+  planner: 2
+
+planning:
+  enabled: true
+  context_classes: [DEEP]
 
 codex:
   binary: codex
@@ -60,3 +65,5 @@ claude:
 ```
 
 Explicit project quality/security commands are preferred for production repositories. Autodetection is a fallback.
+
+`planning.context_classes` lists which routed `context_class` values (`SMALL`/`NORMAL`/`DEEP`) trigger a read-only Planner stage before implementation; `planning.enabled: false` disables it entirely regardless of context class. `retries.planner` bounds Planner retries — exhausting the budget blocks the task rather than looping indefinitely.

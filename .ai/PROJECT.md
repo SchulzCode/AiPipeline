@@ -28,7 +28,14 @@ multi-user use with GitHub App auth and webhook ingestion.
   CLI-invocation glue (auth-env collection, output truncation) lives in
   `agents/base.py` — see `.ai/DECISIONS.md` D-002. Per-adapter `MODELS` is
   the one source of truth for available models, looked up via
-  `agents.agent_models()`.
+  `agents.agent_models()`. `agents.base.READ_ONLY_ROLES` is the shared set of
+  roles (REVIEWER/SECURITY_REVIEWER/ROUTER/PLANNER) both adapters sandbox to
+  read-only tools.
+- A conditional, read-only PLANNER role runs during `PLANNING` when
+  `router.planner_required(route.context_class, config)` is true (default:
+  `context_class == DEEP`); it produces a plan that is stored as a `PLAN`
+  event and passed into the Implementer's context — see `.ai/DECISIONS.md`
+  D-003.
 - `quality.py` / `security.py` / `setup_engine.py` each own command
   *selection* (autodetection or `.ai/config.yml` overrides) but share one
   command *execution* primitive, `util.execute_commands()` — see

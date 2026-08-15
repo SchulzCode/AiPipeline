@@ -33,13 +33,23 @@ class ContextBuilder:
                 active.append(c.strip())
         return truncate("\n\n".join(active), limit)
 
-    def build(self, repo: Path, task: TaskContract, role: str, diff: str = "", findings: str = "") -> str:
+    def build(
+        self,
+        repo: Path,
+        task: TaskContract,
+        role: str,
+        diff: str = "",
+        findings: str = "",
+        plan: str = "",
+    ) -> str:
         scopes = task.route.scopes if task.route else ["general"]
         parts = [
             f"# Role\n{role}\n",
             f"# Task\nID: {task.id}\nGoal: {truncate(task.goal, 16000)}\n",
             "# Acceptance Criteria\n" + "\n".join(f"- {x}" for x in task.acceptance_criteria),
         ]
+        if plan:
+            parts.append("# Implementation Plan\n" + truncate(plan, 10000))
         agent_rules = self._read(self.global_root / "AGENT.md", 5000)
         project = self._read(repo / ".ai" / "PROJECT.md", 8000)
         if agent_rules:

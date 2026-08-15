@@ -153,6 +153,14 @@ export default function TaskPage() {
         </div>
       </section>
 
+      {/* 3b. Planner output */}
+      {activity?.checks.plan && (
+        <section className="mt-6 rounded-2xl border border-white/10 bg-white/[0.03] p-5">
+          <h2 className="font-semibold">Implementation plan</h2>
+          <pre className="mt-3 max-h-96 overflow-auto whitespace-pre-wrap break-words text-sm text-zinc-300">{activity.checks.plan.plan}</pre>
+        </section>
+      )}
+
       {/* 4. Activity timeline */}
       <section className="mt-6">
         <h2 className="mb-3 text-lg font-semibold">Activity</h2>

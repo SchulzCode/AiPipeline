@@ -100,6 +100,43 @@ def test_ci_checks_are_aggregated_into_a_single_result():
     assert feed["checks"]["ci"] == {"total": 2, "passed": 1, "failed": 1}
 
 
+def test_planner_run_and_plan_are_summarized_in_the_feed():
+    events = [
+        _event(1, "core:status", {"status": "PLANNING"}, _ts(0)),
+        _event(2, "core:event", {"event": "PLANNER_RUN", "detail": "attempt=1 rc=0\nGoal\nDo the thing."}, _ts(1)),
+        _event(3, "core:event", {"event": "PLAN", "detail": "Goal\nDo the thing.\n\nAffected components\n- api"}, _ts(2)),
+    ]
+    feed = build_activity_feed(_task("PLANNING"), events, "Claude")
+
+    run_item = next(i for i in feed["items"] if i["title"] == "Planner attempt 1")
+    assert run_item["result"] == "Plan produced."
+    assert run_item["status"] == "success"
+
+    plan_item = next(i for i in feed["items"] if i["title"] == "Implementation plan")
+    assert plan_item["result"] == "Goal"
+    assert plan_item["status"] == "success"
+
+    assert feed["checks"]["plan"]["status"] == "success"
+    assert "Affected components" in feed["checks"]["plan"]["plan"]
+
+
+def test_planner_failed_attempt_is_surfaced_as_a_warning():
+    events = [
+        _event(1, "core:status", {"status": "PLANNING"}, _ts(0)),
+        _event(2, "core:event", {"event": "PLANNER_RUN", "detail": "attempt=2 rc=1\nagent crashed"}, _ts(1)),
+    ]
+    feed = build_activity_feed(_task("PLANNING"), events, "Codex")
+    run_item = next(i for i in feed["items"] if i["title"] == "Planner attempt 2")
+    assert run_item["result"] == "Attempt did not produce a usable plan."
+    assert run_item["status"] == "warning"
+
+
+def test_no_plan_event_leaves_plan_summary_unset():
+    events = [_event(1, "core:status", {"status": "IMPLEMENTING"}, _ts(0))]
+    feed = build_activity_feed(_task("IMPLEMENTING"), events, "Claude")
+    assert feed["checks"]["plan"] is None
+
+
 def test_blocked_state_surfaces_reason_and_last_successful_phase():
     events = [
         _event(1, "core:status", {"status": "ROUTING"}, _ts(0)),

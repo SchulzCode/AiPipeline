@@ -25,11 +25,30 @@ class _State:
         self.events.append(args)
 
 
-def _orchestrator(review_attempts=2):
+class _MutatingGit:
+    """A `.diff()` fake that returns a different value on each successive call.
+
+    Used to simulate a "read-only" role unexpectedly mutating the worktree,
+    the same way the real diff-hash tripwire in `_invoke_review`/`_run_planner`
+    would detect it.
+    """
+
+    def __init__(self, sequence):
+        self._sequence = list(sequence)
+        self._index = 0
+
+    def diff(self, worktree):
+        value = self._sequence[min(self._index, len(self._sequence) - 1)]
+        self._index += 1
+        return value
+
+
+def _orchestrator(review_attempts=2, planner_attempts=2):
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = SimpleNamespace(
         review_attempts=review_attempts,
         verification_attempts=2,
+        planner_attempts=planner_attempts,
     )
     orch.context = _Context()
     orch.git = _Git()
@@ -193,3 +212,86 @@ def test_verification_blocks_after_last_fix_is_actually_rechecked():
 
     assert len(gate_calls) == 3
     assert len(fix_calls) == 2
+
+
+def test_planner_returns_plan_on_first_success():
+    orch = _orchestrator(planner_attempts=2)
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append((role, attempt))
+        return _agent_result(ok=True, output="Goal\nDo the thing.\n")
+
+    orch._agent_run = agent_run
+
+    plan = orch._run_planner(1, SimpleNamespace(), SimpleNamespace())
+
+    assert plan == "Goal\nDo the thing.\n"
+    assert calls == [("PLANNER", 1)]
+    kinds = [e[1] for e in orch.state.events]  # state.event(task_db_id, kind, detail)
+    assert kinds == ["PLANNER_RUN", "PLAN"]
+
+
+def test_planner_retries_once_then_succeeds_within_budget():
+    orch = _orchestrator(planner_attempts=2)
+    outputs = iter([
+        _agent_result(ok=True, output=""),  # empty plan: not usable, must retry
+        _agent_result(ok=True, output="Goal\nDo the thing.\n"),
+    ])
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        return next(outputs)
+
+    orch._agent_run = agent_run
+
+    plan = orch._run_planner(1, SimpleNamespace(), SimpleNamespace())
+
+    assert plan == "Goal\nDo the thing.\n"
+    assert calls == [1, 2]
+
+
+def test_planner_is_blocked_after_exhausting_retry_budget():
+    orch = _orchestrator(planner_attempts=2)
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        return _agent_result(ok=False, output="agent crashed")
+
+    orch._agent_run = agent_run
+
+    with pytest.raises(PipelineBlocked) as exc:
+        orch._run_planner(1, SimpleNamespace(), SimpleNamespace())
+
+    assert exc.value.category == FailureCategory.PLANNING_FAILURE
+    assert calls == [1, 2]  # bounded: never loops past the configured budget
+
+
+def test_planner_does_not_create_an_infinite_loop_with_a_budget_of_one():
+    orch = _orchestrator(planner_attempts=1)
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        return _agent_result(ok=False, output="")
+
+    orch._agent_run = agent_run
+
+    with pytest.raises(PipelineBlocked):
+        orch._run_planner(1, SimpleNamespace(), SimpleNamespace())
+
+    assert calls == [1]
+
+
+def test_planner_mutating_the_worktree_is_blocked_as_state_inconsistency():
+    orch = _orchestrator(planner_attempts=3)
+    orch.git = _MutatingGit(["diff-before", "diff-after-mutation"])
+    orch._agent_run = lambda *args, **kwargs: _agent_result(ok=True, output="Goal\n...")
+
+    with pytest.raises(PipelineBlocked) as exc:
+        orch._run_planner(1, SimpleNamespace(), SimpleNamespace())
+
+    assert exc.value.category == FailureCategory.STATE_INCONSISTENCY
+    assert "read-only" in str(exc.value)

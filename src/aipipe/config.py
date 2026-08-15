@@ -23,6 +23,9 @@ class PipelineConfig:
     ci_attempts: int = 2
     external_attempts: int = 3
     external_backoff_seconds: float = 2.0
+    planner_attempts: int = 2
+    planner_enabled: bool = True
+    planner_context_classes: tuple[str, ...] = ("DEEP",)
     setup_commands: dict[str, str] = field(default_factory=dict)
     setup_auto: bool = True
     quality_commands: dict[str, str] = field(default_factory=dict)
@@ -61,6 +64,7 @@ def load_config(repo: Path | None = None) -> PipelineConfig:
     quality = merged.get("quality", {})
     security = merged.get("security", {})
     git = merged.get("git", {})
+    planning = merged.get("planning", {})
     return PipelineConfig(
         main_branch=merged.get("main_branch", "main"),
         agent=merged.get("agent", "codex"),
@@ -75,6 +79,11 @@ def load_config(repo: Path | None = None) -> PipelineConfig:
         ci_attempts=int(retries.get("ci", 2)),
         external_attempts=int(retries.get("external", 3)),
         external_backoff_seconds=float(retries.get("external_backoff_seconds", 2.0)),
+        planner_attempts=int(retries.get("planner", 2)),
+        planner_enabled=bool(planning.get("enabled", True)),
+        planner_context_classes=tuple(
+            str(c).upper() for c in planning.get("context_classes", ["DEEP"])
+        ),
         setup_commands=dict(setup.get("commands", {})),
         setup_auto=bool(setup.get("auto", True)),
         quality_commands=dict(quality.get("commands", {})),

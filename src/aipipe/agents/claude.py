@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .base import AgentResult, ModelOption, collect_env, finalize_result
+from .base import AgentResult, ModelOption, READ_ONLY_ROLES, collect_env, finalize_result
 from ..util import require_binary, run, safe_process_env
 
 
@@ -28,7 +28,7 @@ class ClaudeAdapter:
     def run(self, role: str, prompt: str, workspace: Path) -> AgentResult:
         binary = self.config.get("binary", "claude")
         cmd = [binary, "-p", "--no-session-persistence", "--output-format", "json"]
-        if role in {"REVIEWER", "SECURITY_REVIEWER", "ROUTER"}:
+        if role in READ_ONLY_ROLES:
             cmd += ["--tools", "Read,Grep,Glob", "--permission-mode", "auto"]
         else:
             cmd += ["--permission-mode", self.config.get("permission_mode", "auto")]
