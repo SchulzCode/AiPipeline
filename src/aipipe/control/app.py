@@ -1,15 +1,15 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
-from urllib.parse import quote
+from pathlib import Path
 
-from fastapi import Depends, FastAPI, HTTPException, Request, Response, status
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse, StreamingResponse
-from sqlalchemy import desc, select
+from sqlalchemy import select
 
 from aipipe.agents import AGENT_MODELS
 
@@ -118,7 +118,7 @@ def github_login() -> Response:
 @app.get("/auth/github/callback")
 def github_callback(request: Request, code: str, state: str) -> Response:
     expected = request.cookies.get(OAUTH_STATE_COOKIE)
-    if not expected or not __import__("hmac").compare_digest(expected, state):
+    if not expected or not hmac.compare_digest(expected, state):
         raise HTTPException(status_code=400, detail="Invalid OAuth state")
     profile = exchange_code(settings, code)
     if settings.allowed_github_logins and profile.get("login", "").lower() not in settings.allowed_github_logins:
@@ -168,7 +168,7 @@ def list_projects(_: User = Depends(current_user)):
 @app.post("/projects", response_model=ProjectOut, status_code=201)
 def create_project(payload: ProjectCreate, _: User = Depends(current_user)):
     if payload.local_path:
-        path = __import__("pathlib").Path(payload.local_path).expanduser().resolve()
+        path = Path(payload.local_path).expanduser().resolve()
         if not path.exists():
             raise HTTPException(400, "local_path does not exist")
     if payload.installation_id and payload.repository_full_name:

@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .util import CommandResult, run, safe_process_env, truncate
+from .util import CommandResult, execute_commands
 
 
 QUALITY_SCRIPT_ORDER = ("test", "lint", "typecheck", "build")
@@ -412,41 +412,9 @@ class QualityEngine:
             or autodetect_quality(repo)
         )
 
-        results: list[
-            tuple[str, CommandResult]
-        ] = []
-
-        env = safe_process_env(
-            self.runtime_env
+        return execute_commands(
+            commands,
+            repo,
+            self.timeout,
+            self.runtime_env,
         )
-
-        for name, command in (
-            commands.items()
-        ):
-            result = run(
-                command,
-                repo,
-                self.timeout,
-                shell=True,
-                env=env,
-                inherit_env=False,
-            )
-
-            result.stdout = truncate(
-                result.stdout
-            )
-
-            result.stderr = truncate(
-                result.stderr
-            )
-
-            results.append(
-                (name, result)
-            )
-
-            # Fail fast so a broken prerequisite does not
-            # produce noisy or misleading downstream errors.
-            if not result.ok:
-                break
-
-        return results
