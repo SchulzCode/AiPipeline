@@ -13,11 +13,11 @@ from .git_manager import GitManager
 from .github import GitHubAdapter
 from .knowledge import init_project_knowledge
 from .merge_policy import MergeEvidence, merge_allowed
-from .models import FailureCategory, Risk, TaskContract, TaskStatus
-from .prompts import IMPLEMENTER_SUFFIX, REVIEWER_SUFFIX, SECURITY_SUFFIX
+from .models import ContextClass, FailureCategory, Risk, TaskContract, TaskStatus
+from .prompts import IMPLEMENTER_SUFFIX, PLANNER_SUFFIX, REVIEWER_SUFFIX, SECURITY_SUFFIX
 from .quality import QualityEngine
 from .reliability import ReviewVerdict, looks_transient, parse_review_verdict
-from .router import acceptance_from_text, route_task
+from .router import acceptance_from_text, planner_required, route_task
 from .security import SecurityEngine, scan_added_diff
 from .setup_engine import SetupEngine
 from .state import StateStore
@@ -167,14 +167,26 @@ class Orchestrator:
             "external_attempts": self.config.external_attempts,
             "ci_timeout_seconds": self.config.ci_timeout_seconds,
             "ci_registration_grace_seconds": self.config.ci_registration_grace_seconds,
+            "planner_attempts": self.config.planner_attempts,
         }
         for name, value in numeric.items():
-            minimum = 1 if name in {"implementation_attempts", "external_attempts", "ci_timeout_seconds"} else 0
+            minimum = (
+                1
+                if name in {"implementation_attempts", "external_attempts", "ci_timeout_seconds", "planner_attempts"}
+                else 0
+            )
             if value < minimum:
                 raise PipelineBlocked(
                     f"Invalid configuration: {name}={value} (minimum {minimum}).",
                     FailureCategory.CONFIGURATION,
                 )
+        valid_context_classes = {c.value for c in ContextClass}
+        invalid_classes = set(self.config.planner_context_classes) - valid_context_classes
+        if invalid_classes:
+            raise PipelineBlocked(
+                f"Invalid planning.context_classes entries: {sorted(invalid_classes)}.",
+                FailureCategory.CONFIGURATION,
+            )
         for group_name, commands in {
             "setup": self.config.setup_commands,
             "quality": self.config.quality_commands,
@@ -653,6 +665,44 @@ class Orchestrator:
 
         return review_ok, security_review_ok
 
+    def _run_planner(
+        self,
+        task_db_id: int,
+        contract: TaskContract,
+        worktree: Path,
+    ) -> str:
+        prompt = (
+            self.context.build(worktree, contract, "PLANNER")
+            + "\n\n"
+            + PLANNER_SUFFIX
+        )
+        attempts = max(1, self.config.planner_attempts)
+        last_output = ""
+
+        for attempt in range(1, attempts + 1):
+            before_hash = self._diff_hash(worktree)
+            result = self._agent_run(task_db_id, "PLANNER", prompt, worktree, attempt)
+            if self._diff_hash(worktree) != before_hash:
+                raise PipelineBlocked(
+                    "PLANNER modified repository state despite being a read-only stage.",
+                    FailureCategory.STATE_INCONSISTENCY,
+                )
+
+            last_output = result.output
+            self.state.event(
+                task_db_id,
+                "PLANNER_RUN",
+                f"attempt={attempt} rc={result.returncode}\n{truncate(result.output, 7000)}",
+            )
+            if result.ok and result.output.strip():
+                self.state.event(task_db_id, "PLAN", truncate(result.output, 12000))
+                return result.output
+
+        raise PipelineBlocked(
+            f"Planner did not produce a usable plan within the bounded retry budget. {truncate(last_output, 1500)}".strip(),
+            FailureCategory.PLANNING_FAILURE,
+        )
+
     def run(self, public_id: str, labels: list[str] | None = None) -> None:
         task_row = self.state.task(public_id)
         task_db_id = int(task_row["id"])
@@ -731,10 +781,13 @@ class Orchestrator:
 
             self.state.set_status(public_id, TaskStatus.DISCOVERY)
             self.state.set_status(public_id, TaskStatus.PLANNING)
+            plan_text = ""
+            if planner_required(route.context_class, self.config):
+                plan_text = self._run_planner(task_db_id, contract, worktree)
             self.state.set_status(public_id, TaskStatus.IMPLEMENTING)
 
             implement_context = (
-                self.context.build(worktree, contract, "IMPLEMENTER")
+                self.context.build(worktree, contract, "IMPLEMENTER", plan=plan_text)
                 + "\n\n"
                 + IMPLEMENTER_SUFFIX
             )

@@ -68,11 +68,13 @@ export type Blocker = { reason: string; last_phase?: string | null; category?: s
 export type CheckStatus = { type: string; name: string; status: string; updated_at: string };
 export type ReviewSummary = { status: ActivityStatus; result: string; updated_at: string };
 export type CiSummary = { total: number; passed: number; failed: number };
+export type PlanSummary = { status: ActivityStatus; plan: string; updated_at: string };
 export type ChecksSummary = {
   checks: CheckStatus[];
   review?: ReviewSummary | null;
   security_review?: ReviewSummary | null;
   ci?: CiSummary | null;
+  plan?: PlanSummary | null;
 };
 
 export type ActivityFeed = {

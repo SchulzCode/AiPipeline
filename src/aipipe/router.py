@@ -78,6 +78,21 @@ def route_task(text: str, labels: list[str] | None = None) -> Route:
     return Route(task_type, risk, context, scopes, list(dict.fromkeys(gates)))
 
 
+def planner_required(context_class: ContextClass | str, config) -> bool:
+    """Decide whether the Planner stage should run for a routed task.
+
+    Kept independent of Risk: an architecturally complex but low-risk task
+    can still benefit from planning, while a high-risk small change may need
+    security review without needing a Planner. Gated purely on the routed
+    ContextClass and the project's configured threshold, so it stays cheap
+    (no LLM call) and unit-testable without a real PipelineConfig.
+    """
+    if not getattr(config, "planner_enabled", True):
+        return False
+    allowed = {str(c).upper() for c in getattr(config, "planner_context_classes", ("DEEP",))}
+    return str(context_class).upper() in allowed
+
+
 def acceptance_from_text(text: str) -> list[str]:
     lines = [re.sub(r"^[-*\d.\s]+", "", line).strip() for line in text.splitlines()]
     explicit = [l for l in lines if l and any(k in l.lower() for k in ["must ", "should ", "accept", "expected", "when "])]

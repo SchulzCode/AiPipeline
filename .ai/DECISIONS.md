@@ -45,3 +45,37 @@ do with either provider (e.g. the stderr truncation limit), while leaving the
 genuinely provider-specific parts untouched. Adding a third adapter only
 needs to implement command construction + output parsing, not re-derive the
 env/truncation glue.
+
+## D-003 Gate the Planner role on `context_class`, not `risk`
+Tags: backend, orchestrator, agents, planning
+Status: active
+Severity: low
+
+Decision:
+A `PLANNER` role runs once during the existing (previously no-op) `PLANNING`
+status, only when `router.planner_required(route.context_class, config)` is
+true — default: `context_class == DEEP` and `planning.enabled` (default
+true); both are configurable per-project via `.ai/config.yml`
+(`planning.context_classes`, `planning.enabled`) — see
+`docs/CONFIGURATION.md`. It shares the read-only sandbox already used by
+REVIEWER/SECURITY_REVIEWER/ROUTER, now centralized as
+`agents.base.READ_ONLY_ROLES` instead of being duplicated per-adapter. Its
+prompt reuses `ContextBuilder.build()` (no diff/whole-repo dump — the agent
+explores the worktree itself with Read/Grep/Glob-only tools) plus a new
+`PLANNER_SUFFIX`. Output is bounded by `retries.planner` (default 2, no
+code-mutation remediation loop like IMPLEMENTER gets) and, on success, is
+both recorded as a `PLAN` event and threaded into the Implementer's prompt
+via `ContextBuilder.build(..., plan=...)`. Exhausting the retry budget raises
+`PipelineBlocked(FailureCategory.PLANNING_FAILURE)` rather than silently
+proceeding without a plan.
+
+Reason:
+Risk and complexity are different axes: a high-risk one-line credential
+change doesn't need a plan, while a low-risk but architecturally broad
+refactor benefits from one. Gating on `context_class` (already computed by
+`route_task` but previously unused for anything except display) keeps that
+distinction instead of coupling planning to the REVIEWER/SECURITY_REVIEWER
+risk gates in `_semantic_gates_after_change`. Blocking (rather than
+skipping) on exhausted Planner retries matches how every other gate in the
+pipeline treats a bounded-retry failure, so a silently-skipped Planner never
+masks a broken agent/CLI as normal operation.

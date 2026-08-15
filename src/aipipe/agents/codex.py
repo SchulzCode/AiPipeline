@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from .base import AgentResult, ModelOption, collect_env, finalize_result
+from .base import AgentResult, ModelOption, READ_ONLY_ROLES, collect_env, finalize_result
 from ..util import require_binary, run, safe_process_env, truncate
 
 
@@ -25,7 +25,7 @@ class CodexAdapter:
 
     def run(self, role: str, prompt: str, workspace: Path) -> AgentResult:
         binary = self.config.get("binary", "codex")
-        sandbox = "read-only" if role in {"REVIEWER", "SECURITY_REVIEWER", "ROUTER"} else "workspace-write"
+        sandbox = "read-only" if role in READ_ONLY_ROLES else "workspace-write"
         cmd = [binary, "exec", "--ephemeral", "--json", "--sandbox", sandbox, "--ask-for-approval", "never"]
         if self.config.get("ignore_user_config", True):
             cmd.append("--ignore-user-config")

@@ -8,6 +8,20 @@ If the task cannot be safely completed, explain the concrete blocker in your fin
 If the task reveals durable knowledge that will materially help future unrelated tasks, update the appropriate .ai/PROJECT.md, .ai/DECISIONS.md, or .ai/LEARNINGS.md entry as part of the same implementation. Do not write task history and do not add knowledge when nothing reusable was learned.
 """
 
+PLANNER_SUFFIX = """
+You are a planning agent inside an autonomous production engineering pipeline. Do not modify files or write implementation code.
+Use your read-only tools to explore the repository for the components, existing patterns, and constraints relevant to this task before planning.
+Return a concise, structured implementation plan using exactly these section headings, in this order:
+Goal
+Affected components
+Relevant files
+Implementation steps
+Risks / compatibility concerns
+Required tests
+Out of scope
+Be specific to this task and this repository; omit generic advice. The Implementer will receive this plan as guidance, not as a contract to follow blindly.
+"""
+
 REVIEWER_SUFFIX = """
 You are an independent code reviewer. Do not modify files.
 Review the supplied task, constraints, diff and repository evidence. Focus on correctness, regressions, missing acceptance criteria, unsafe behavior, inadequate tests, and unnecessary scope.

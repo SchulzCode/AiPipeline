@@ -148,6 +148,7 @@ class _Builder:
         self.latest_review: dict[str, Any] | None = None
         self.latest_security_review: dict[str, Any] | None = None
         self.latest_ci: dict[str, Any] | None = None
+        self.latest_plan: dict[str, Any] | None = None
 
     def _close_phase(self, end_ts: datetime) -> None:
         if not self.open_phase:
@@ -291,6 +292,36 @@ class _Builder:
                 ts,
                 event_id,
             )
+            return
+
+        if inner == "PLANNER_RUN":
+            match = _ATTEMPT_RE.search(detail_text)
+            attempt = match.group(1) if match else "?"
+            ok = bool(match) and match.group(2) == "0"
+            self._append(
+                category,
+                f"Planner attempt {attempt}",
+                f"{self.agent_label} explored the repository to plan the implementation.",
+                "Plan produced." if ok else "Attempt did not produce a usable plan.",
+                "success" if ok else "warning",
+                ts,
+                event_id,
+            )
+            return
+
+        if inner == "PLAN":
+            snippet = detail_text.strip().splitlines()
+            preview = snippet[0][:200] if snippet else "Plan recorded."
+            item = self._append(
+                category,
+                "Implementation plan",
+                f"{self.agent_label} produced a structured implementation plan for the Implementer.",
+                preview,
+                "success",
+                ts,
+                event_id,
+            )
+            self.latest_plan = {"status": item.status, "plan": detail_text, "updated_at": ts}
             return
 
         if inner in {"REVIEW", "SECURITY_REVIEW"}:
@@ -480,5 +511,6 @@ def build_activity_feed(task: Any, events: Iterable[Any], agent_label: str) -> d
             "review": builder.latest_review,
             "security_review": builder.latest_security_review,
             "ci": builder.latest_ci,
+            "plan": builder.latest_plan,
         },
     }
