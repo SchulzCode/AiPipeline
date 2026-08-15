@@ -1,8 +1,12 @@
 import subprocess
 
+import pytest
+
 from aipipe.control.db import Database
 from aipipe.control.executor import TaskExecutor
 from aipipe.control.models import ControlTask, Project
+from aipipe.models import FailureCategory
+from aipipe.orchestrator import PipelineBlocked
 from test_control_db import settings
 
 
@@ -66,3 +70,31 @@ def test_executor_passes_none_model_for_backward_compatible_projects(monkeypatch
     executor.execute(task_id)
 
     assert captured["model_override"] is None
+
+
+def test_executor_refuses_to_create_second_core_task_for_existing_control_task(tmp_path):
+    repo = tmp_path / "repo"; repo.mkdir()
+    subprocess.run(["git", "init"], cwd=repo, check=True, capture_output=True)
+    db = Database(settings(tmp_path)); db.create_all()
+    with db.session() as s:
+        project = Project(name="demo", local_path=str(repo), agent="codex")
+        s.add(project); s.flush()
+        task = ControlTask(
+            project_id=project.id,
+            source="prompt",
+            prompt="do it",
+            core_task_id="T-0042",
+        )
+        s.add(task); s.flush()
+        task_id = task.id
+
+    executor = TaskExecutor(db, db.settings)
+    with pytest.raises(PipelineBlocked) as exc:
+        executor.execute(task_id)
+
+    assert exc.value.category == FailureCategory.STATE_INCONSISTENCY
+    with db.session() as s:
+        task = s.get(ControlTask, task_id)
+        assert task.core_task_id == "T-0042"
+        assert task.status == "BLOCKED"
+        assert task.failure_category == FailureCategory.STATE_INCONSISTENCY.value
