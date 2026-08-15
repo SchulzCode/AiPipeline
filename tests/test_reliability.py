@@ -18,8 +18,60 @@ def test_json_findings_verdict():
     assert parsed.findings == ("MEDIUM: regression",)
 
 
+def test_json_pass_with_surrounding_prose_is_accepted():
+    parsed = parse_review_verdict(
+        "Test fixture consolidation only affects test-only dev-auth setup, "
+        "not production code paths — no security impact.\n\n"
+        '{"verdict":"PASS","findings":[]}'
+    )
+    assert parsed.verdict == ReviewVerdict.PASS
+    assert parsed.findings == ()
+
+
+def test_json_findings_with_surrounding_prose_is_accepted():
+    parsed = parse_review_verdict(
+        "I found one actionable regression.\n\n"
+        '{"verdict":"FINDINGS","findings":["MEDIUM: regression"]}\n'
+        "Review complete."
+    )
+    assert parsed.verdict == ReviewVerdict.FINDINGS
+    assert parsed.findings == ("MEDIUM: regression",)
+
+
+def test_duplicate_equivalent_json_verdicts_are_not_ambiguous():
+    parsed = parse_review_verdict(
+        '{"verdict":"PASS","findings":[]}\n'
+        "Same conclusion after final check.\n"
+        '{"verdict":"PASS","findings":[]}'
+    )
+    assert parsed.verdict == ReviewVerdict.PASS
+
+
+def test_conflicting_embedded_json_verdicts_are_protocol_error():
+    parsed = parse_review_verdict(
+        '{"verdict":"PASS","findings":[]}\n'
+        '{"verdict":"FINDINGS","findings":["MEDIUM: regression"]}'
+    )
+    assert parsed.verdict == ReviewVerdict.PROTOCOL_ERROR
+
+
+def test_embedded_json_conflicting_with_legacy_marker_is_protocol_error():
+    parsed = parse_review_verdict(
+        "FINDINGS\n- MEDIUM: regression\n"
+        '{"verdict":"PASS","findings":[]}'
+    )
+    assert parsed.verdict == ReviewVerdict.PROTOCOL_ERROR
+
+
 def test_legacy_explanation_followed_by_pass_is_accepted():
     parsed = parse_review_verdict("Checked the current diff.\nPASS")
+    assert parsed.verdict == ReviewVerdict.PASS
+
+
+def test_markdown_legacy_verdict_pass_is_accepted():
+    parsed = parse_review_verdict(
+        "My review is complete — no issues found.\n\n**Verdict: PASS**\n\nDetails follow."
+    )
     assert parsed.verdict == ReviewVerdict.PASS
 
 
