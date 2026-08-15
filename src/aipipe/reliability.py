@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -165,8 +166,37 @@ def retry_transient(
     raise last
 
 
+def _source_fingerprint() -> str:
+    """Fingerprint installed AIpipe Python source when image git metadata is absent.
+
+    Docker images normally do not include the repository's .git directory. A
+    content fingerprint still lets the API and worker detect that they are
+    running different builds even when the package version was not bumped.
+    """
+
+    root = Path(__file__).resolve().parent
+    digest = hashlib.sha256()
+    files = sorted(
+        path
+        for path in root.rglob("*.py")
+        if path.is_file() and "__pycache__" not in path.parts
+    )
+    for path in files:
+        digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+        try:
+            digest.update(path.read_bytes())
+        except OSError:
+            continue
+    return digest.hexdigest()[:12] if files else "unknown"
+
+
 def build_identity(repo: Path | None = None) -> str:
-    """Return a stable human-readable runtime build identity."""
+    """Return a stable human-readable runtime build identity.
+
+    Preference order is an explicit build SHA, a repository commit, then an
+    installed-source fingerprint. This keeps local CLI output intuitive while
+    making Docker API/worker builds comparable even without .git metadata.
+    """
 
     try:
         package_version = version("aipipe")
@@ -185,5 +215,5 @@ def build_identity(repo: Path | None = None) -> str:
         if result.ok:
             sha = result.stdout.strip()
 
-    suffix = sha[:12] if sha else "unknown"
+    suffix = sha[:12] if sha else _source_fingerprint()
     return f"{package_version}+{suffix}"
