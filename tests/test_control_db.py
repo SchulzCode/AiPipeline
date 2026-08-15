@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 
 from aipipe.control.config import ControlSettings
 from aipipe.control.db import Database
@@ -65,3 +65,79 @@ def test_project_model_roundtrip(tmp_path):
         project_id = project.id
     with db.session() as s:
         assert s.get(Project, project_id).model == "sonnet"
+
+
+def test_create_all_upgrades_existing_control_schema(tmp_path):
+    db = Database(settings(tmp_path))
+
+    # Schema immediately before the hardening fields were introduced. It is
+    # deliberately complete apart from columns with an explicit upgrade path;
+    # create_all is not expected to invent arbitrary historical migrations.
+    with db.engine.begin() as connection:
+        connection.execute(text(
+            """
+            CREATE TABLE control_projects (
+                id VARCHAR(36) PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                repository_full_name VARCHAR(512),
+                repository_url TEXT,
+                local_path TEXT,
+                installation_id INTEGER,
+                default_branch VARCHAR(255) NOT NULL,
+                agent VARCHAR(32) NOT NULL,
+                enabled BOOLEAN NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+            """
+        ))
+        connection.execute(text(
+            """
+            CREATE TABLE control_tasks (
+                id VARCHAR(36) PRIMARY KEY,
+                project_id VARCHAR(36) NOT NULL,
+                source VARCHAR(32) NOT NULL,
+                source_reference VARCHAR(255),
+                title VARCHAR(512),
+                prompt TEXT NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                risk VARCHAR(32),
+                context_class VARCHAR(32),
+                core_task_id VARCHAR(32),
+                branch TEXT,
+                pr_number INTEGER,
+                error TEXT,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                claimed_by VARCHAR(255),
+                heartbeat_at DATETIME,
+                created_at DATETIME NOT NULL,
+                started_at DATETIME,
+                completed_at DATETIME
+            )
+            """
+        ))
+
+    db.create_all()
+
+    project_columns = {
+        column["name"]
+        for column in inspect(db.engine).get_columns("control_projects")
+    }
+    task_columns = {
+        column["name"]
+        for column in inspect(db.engine).get_columns("control_tasks")
+    }
+
+    assert "model" in project_columns
+    assert "failure_category" in task_columns
+    assert "worker_build" in task_columns
+    assert db.schema_status()["ok"] is True
+
+
+def test_create_all_is_idempotent_after_migrations(tmp_path):
+    db = Database(settings(tmp_path))
+    db.create_all()
+    db.create_all()
+    assert db.ping() is True
+    assert db.schema_status() == {"ok": True, "missing": []}

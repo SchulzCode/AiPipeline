@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .models import TaskStatus
+from .models import FailureCategory, TaskStatus
 
 
 SCHEMA = """
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS tasks (
   branch TEXT,
   worktree TEXT,
   pr_number INTEGER,
+  failure_category TEXT,
   created_at TEXT NOT NULL,
   completed_at TEXT,
   FOREIGN KEY(project_id) REFERENCES projects(id)
@@ -108,8 +109,26 @@ class StateStore:
         self.db = sqlite3.connect(path)
         self.db.row_factory = sqlite3.Row
         self.db.executescript(SCHEMA)
+        self._ensure_column("tasks", "failure_category", "TEXT")
         self.db.commit()
 
+    def _ensure_column(self, table: str, column: str, ddl: str) -> None:
+        columns = {
+            str(row["name"])
+            for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column in columns:
+            return
+        try:
+            self.db.execute(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+        except sqlite3.OperationalError:
+            # A second process may have applied the same idempotent migration.
+            columns = {
+                str(row["name"])
+                for row in self.db.execute(f"PRAGMA table_info({table})").fetchall()
+            }
+            if column not in columns:
+                raise
 
     def _notify(self, kind: str, payload: dict[str, Any]) -> None:
         if self.observer:
@@ -151,7 +170,8 @@ class StateStore:
     def update_task(self, public_id: str, **fields: Any) -> None:
         allowed = {
             "status", "task_type", "risk", "context_class", "scopes_json", "gates_json",
-            "acceptance_json", "branch", "worktree", "pr_number", "completed_at", "title", "goal", "body"
+            "acceptance_json", "branch", "worktree", "pr_number", "failure_category",
+            "completed_at", "title", "goal", "body"
         }
         fields = {k: v for k, v in fields.items() if k in allowed}
         if not fields:
@@ -161,14 +181,31 @@ class StateStore:
         self.db.commit()
         self._notify("task_updated", {"public_id": public_id, "fields": fields})
 
-    def set_status(self, public_id: str, status: TaskStatus, detail: str | None = None) -> None:
+    def set_status(
+        self,
+        public_id: str,
+        status: TaskStatus,
+        detail: str | None = None,
+        failure_category: FailureCategory | str | None = None,
+    ) -> None:
         fields: dict[str, Any] = {"status": str(status)}
         if status == TaskStatus.DONE:
             fields["completed_at"] = now()
+            fields["failure_category"] = None
+        elif failure_category is not None:
+            fields["failure_category"] = str(failure_category)
         self.update_task(public_id, **fields)
         task = self.task(public_id)
         self.event(int(task["id"]), f"STATUS:{status}", detail)
-        self._notify("status", {"public_id": public_id, "status": str(status), "detail": detail})
+        self._notify(
+            "status",
+            {
+                "public_id": public_id,
+                "status": str(status),
+                "detail": detail,
+                "failure_category": str(failure_category) if failure_category is not None else None,
+            },
+        )
 
     def event(self, task_id: int, event: str, detail: str | None = None) -> None:
         self.db.execute("INSERT INTO events(task_id,event,detail,created_at) VALUES(?,?,?,?)", (task_id, event, detail, now()))
@@ -191,7 +228,6 @@ class StateStore:
         )
         self.db.commit()
         self._notify("finding", {"task_id": task_id, "source": source, "severity": severity, "status": status, "description": description})
-
 
     def start_run(self, task_id: int, role: str, backend: str, attempt: int) -> int:
         cur = self.db.execute(
@@ -228,5 +264,8 @@ class StateStore:
         return {"input_tokens": int(row["input_tokens"]), "output_tokens": int(row["output_tokens"])}
 
     def list_tasks(self, limit: int = 30) -> list[dict[str, Any]]:
-        rows = self.db.execute("SELECT public_id,title,goal,status,risk,created_at FROM tasks ORDER BY id DESC LIMIT ?", (limit,)).fetchall()
+        rows = self.db.execute(
+            "SELECT public_id,title,goal,status,risk,failure_category,created_at FROM tasks ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
         return [dict(r) for r in rows]

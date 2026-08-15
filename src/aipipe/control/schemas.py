@@ -83,6 +83,8 @@ class TaskOut(ORMModel):
     branch: str | None
     pr_number: int | None
     error: str | None
+    failure_category: str | None = None
+    worker_build: str | None = None
     input_tokens: int
     output_tokens: int
     created_at: datetime
@@ -130,6 +132,7 @@ class CurrentActivityOut(BaseModel):
 class BlockerOut(BaseModel):
     reason: str
     last_phase: str | None = None
+    category: str | None = None
 
 
 class CheckStatusOut(BaseModel):

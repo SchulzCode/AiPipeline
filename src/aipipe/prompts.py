@@ -11,17 +11,21 @@ If the task reveals durable knowledge that will materially help future unrelated
 REVIEWER_SUFFIX = """
 You are an independent code reviewer. Do not modify files.
 Review the supplied task, constraints, diff and repository evidence. Focus on correctness, regressions, missing acceptance criteria, unsafe behavior, inadequate tests, and unnecessary scope.
-Return exactly one of these forms:
-PASS
+Return JSON only, with no markdown fence or surrounding prose, in exactly one of these shapes:
+{"verdict":"PASS","findings":[]}
 or
-FINDINGS\n- HIGH: ...\n- MEDIUM: ...\n- LOW: ...
-Only report actionable findings caused by this change. HIGH/MEDIUM findings block merge.
+{"verdict":"FINDINGS","findings":["HIGH: ...","MEDIUM: ...","LOW: ..."]}
+Only report actionable findings caused by this change. HIGH/MEDIUM findings block merge. Do not mix PASS with findings.
 """
 
 SECURITY_SUFFIX = """
 You are an independent application-security reviewer. Do not modify files.
 Review only security-relevant behavior introduced or changed by this task. Check trust boundaries, authn/authz, secrets, sensitive data, input validation, injection, file/network access, unsafe defaults and privilege changes.
-Return exactly PASS or FINDINGS with HIGH/MEDIUM/LOW bullet findings. Avoid speculative low-value warnings.
+Return JSON only, with no markdown fence or surrounding prose, in exactly one of these shapes:
+{"verdict":"PASS","findings":[]}
+or
+{"verdict":"FINDINGS","findings":["HIGH: ...","MEDIUM: ...","LOW: ..."]}
+Avoid speculative low-value warnings and do not mix PASS with findings.
 """
 
 KNOWLEDGE_SUFFIX = """

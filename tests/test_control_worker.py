@@ -3,6 +3,7 @@ from pathlib import Path
 from aipipe.control.db import Database
 from aipipe.control.models import ControlTask, Project
 from aipipe.control.worker import Worker
+from aipipe.models import FailureCategory
 from test_control_db import settings
 
 
@@ -17,7 +18,9 @@ def test_worker_claims_oldest_task(tmp_path):
     claimed = worker.claim()
     assert claimed == first_id
     with db.session() as s:
-        assert s.get(ControlTask, first_id).status == "CLAIMED"
+        claimed_task = s.get(ControlTask, first_id)
+        assert claimed_task.status == "CLAIMED"
+        assert claimed_task.worker_build == worker.build
         assert s.get(ControlTask, second_id).status == "QUEUED"
 
 
@@ -27,17 +30,19 @@ def test_worker_serializes_tasks_per_project(tmp_path):
         p = Project(name="demo", local_path=str(tmp_path)); s.add(p); s.flush()
         first = ControlTask(project_id=p.id, prompt="one", source="prompt"); s.add(first); s.flush()
         second = ControlTask(project_id=p.id, prompt="two", source="prompt"); s.add(second); s.flush()
+        first_id, second_id, project_id = first.id, second.id, p.id
     w1 = Worker(db, worker_id="w1")
     w2 = Worker(db, worker_id="w2")
-    assert w1.claim() == first.id
+    assert w1.claim() == first_id
     assert w2.claim() is None
     with db.session() as s:
-        assert s.get(Project, p.id).status == "BUSY"
-        assert s.get(ControlTask, second.id).status == "QUEUED"
+        assert s.get(Project, project_id).status == "BUSY"
+        assert s.get(ControlTask, second_id).status == "QUEUED"
 
 
-def test_stale_worker_is_failed_and_project_released(tmp_path):
+def test_stale_worker_is_blocked_and_project_released_without_discarding_state(tmp_path):
     from datetime import datetime, timedelta, timezone
+
     db = Database(settings(tmp_path)); db.create_all()
     with db.session() as s:
         p = Project(name="demo", local_path=str(tmp_path), status="BUSY"); s.add(p); s.flush()
@@ -47,13 +52,22 @@ def test_stale_worker_is_failed_and_project_released(tmp_path):
             source="prompt",
             status="IMPLEMENTING",
             claimed_by="dead-worker",
+            branch="ai/T-0042-example",
+            core_task_id="T-0042",
             heartbeat_at=datetime.now(timezone.utc) - timedelta(seconds=10),
         )
         s.add(task); s.flush(); task_id, project_id = task.id, p.id
+
     worker = Worker(db, worker_id="new-worker")
     assert worker.recover_stale() == 1
+
     with db.session() as s:
         task = s.get(ControlTask, task_id)
-        assert task.status == "FAILED"
+        assert task.status == "BLOCKED"
+        assert task.failure_category == FailureCategory.ENVIRONMENT.value
         assert task.claimed_by is None
+        assert task.heartbeat_at is None
+        assert task.branch == "ai/T-0042-example"
+        assert task.core_task_id == "T-0042"
+        assert "preserved" in task.error
         assert s.get(Project, project_id).status == "IDLE"

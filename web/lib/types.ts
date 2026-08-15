@@ -29,6 +29,8 @@ export type Task = {
   branch?: string | null;
   pr_number?: number | null;
   error?: string | null;
+  failure_category?: string | null;
+  worker_build?: string | null;
   input_tokens: number;
   output_tokens: number;
   created_at: string;
@@ -61,7 +63,7 @@ export type CurrentActivity = {
   agent_label: string;
 };
 
-export type Blocker = { reason: string; last_phase?: string | null };
+export type Blocker = { reason: string; last_phase?: string | null; category?: string | null };
 
 export type CheckStatus = { type: string; name: string; status: string; updated_at: string };
 export type ReviewSummary = { status: ActivityStatus; result: string; updated_at: string };

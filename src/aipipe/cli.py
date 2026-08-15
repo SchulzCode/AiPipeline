@@ -8,6 +8,7 @@ from pathlib import Path
 from .bootstrap import initialize_global, initialize_project
 from .config import home_dir, load_config
 from .orchestrator import Orchestrator, PipelineBlocked
+from .reliability import build_identity
 from .state import StateStore
 from .util import require_binary, run
 
@@ -24,8 +25,84 @@ def build_parser() -> argparse.ArgumentParser:
     s = sub.add_parser("status", help="Show pipeline task state")
     s.add_argument("task_id", nargs="?")
     sub.add_parser("init", help="Initialize global and project AIpipe knowledge/config")
-    sub.add_parser("doctor", help="Check external prerequisites")
+    sub.add_parser("doctor", help="Check execution, repository and integration prerequisites")
     return p
+
+
+def _doctor(repo: Path, agent_override: str | None) -> tuple[dict, bool]:
+    cfg = load_config(repo)
+    backend = agent_override or cfg.agent
+    agent_binary = (
+        cfg.codex.get("binary", "codex")
+        if backend == "codex"
+        else cfg.claude.get("binary", "claude")
+    )
+    report: dict[str, object] = {
+        "build": build_identity(repo if (repo / ".git").exists() else None),
+        "agent": backend,
+        "checks": {},
+    }
+    checks: dict[str, dict[str, str]] = report["checks"]  # type: ignore[assignment]
+
+    def record(name: str, ok: bool, detail: str) -> None:
+        checks[name] = {"status": "ok" if ok else "fail", "detail": detail}
+
+    binaries = ["git", "gh", agent_binary]
+    for binary in binaries:
+        try:
+            require_binary(binary)
+            record(f"binary:{binary}", True, "available")
+        except Exception as exc:
+            record(f"binary:{binary}", False, str(exc))
+
+    if (repo / ".git").exists():
+        top = run(["git", "rev-parse", "--show-toplevel"], repo, timeout=10)
+        record("repository", top.ok, top.stdout.strip() if top.ok else (top.stderr or "not a Git repository").strip())
+
+        origin = run(["git", "remote", "get-url", "origin"], repo, timeout=10)
+        record("origin", origin.ok and bool(origin.stdout.strip()), origin.stdout.strip() if origin.ok else (origin.stderr or "origin missing").strip())
+
+        main_ref = run(["git", "rev-parse", "--verify", f"origin/{cfg.main_branch}"], repo, timeout=10)
+        record(
+            "main_ref",
+            main_ref.ok,
+            f"origin/{cfg.main_branch} -> {main_ref.stdout.strip()}" if main_ref.ok else f"origin/{cfg.main_branch} is missing; run git fetch first",
+        )
+    else:
+        record("repository", False, f"No .git directory at {repo}")
+
+    worktree_root = home_dir() / "worktrees"
+    try:
+        worktree_root.mkdir(parents=True, exist_ok=True)
+        probe = worktree_root / ".doctor-write-probe"
+        probe.write_text("ok", encoding="utf-8")
+        probe.unlink()
+        record("worktree_root", True, str(worktree_root))
+    except OSError as exc:
+        record("worktree_root", False, str(exc))
+
+    retries_ok = all([
+        cfg.implementation_attempts >= 1,
+        cfg.verification_attempts >= 0,
+        cfg.review_attempts >= 0,
+        cfg.ci_attempts >= 0,
+        cfg.external_attempts >= 1,
+        cfg.ci_timeout_seconds >= 1,
+        cfg.ci_registration_grace_seconds >= 0,
+    ])
+    record("retry_configuration", retries_ok, "bounded retry values are valid" if retries_ok else "one or more retry/timeout values are invalid")
+
+    if checks.get("binary:gh", {}).get("status") == "ok":
+        auth = run(["gh", "auth", "status"], repo, timeout=30)
+        record("github_auth", auth.ok, "authenticated" if auth.ok else (auth.stderr or auth.stdout or "authentication failed").strip())
+
+    if backend == "claude" and checks.get(f"binary:{agent_binary}", {}).get("status") == "ok":
+        auth = run([agent_binary, "auth", "status"], repo, timeout=30)
+        record("agent_auth", auth.ok, "authenticated" if auth.ok else (auth.stderr or auth.stdout or "authentication failed").strip())
+
+    ok = all(item["status"] == "ok" for item in checks.values())
+    report["status"] = "ok" if ok else "degraded"
+    return report, ok
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,24 +114,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Initialized AIpipe at {home_dir()} and {repo / '.ai'}")
         return 0
     if args.command == "doctor":
-        cfg = load_config(repo)
-        backend = args.agent or cfg.agent
-        binary = cfg.codex.get("binary", "codex") if backend == "codex" else cfg.claude.get("binary", "claude")
-        checks = {}
-        for binary in ["git", "gh", binary]:
-            try:
-                require_binary(binary)
-                checks[binary] = "ok"
-            except Exception as exc:
-                checks[binary] = str(exc)
-        if checks.get("gh") == "ok":
-            auth = run(["gh", "auth", "status"], repo)
-            checks["github_auth"] = "ok" if auth.ok else "failed"
-        if backend == "claude" and checks.get(cfg.claude.get("binary", "claude")) == "ok":
-            auth = run([cfg.claude.get("binary", "claude"), "auth", "status"], repo)
-            checks["claude_auth"] = "ok" if auth.ok else "failed"
-        print(json.dumps(checks, indent=2))
-        return 0 if all(v == "ok" for v in checks.values()) else 1
+        report, ok = _doctor(repo, args.agent)
+        print(json.dumps(report, indent=2))
+        return 0 if ok else 1
     if args.command == "status":
         store = StateStore(home_dir() / "state" / "pipeline.db")
         if args.task_id:
@@ -74,7 +136,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"{task_id}: DONE")
         return 0
     except PipelineBlocked as exc:
-        print(f"BLOCKED: {exc}", file=sys.stderr)
+        print(f"BLOCKED [{exc.category.value}]: {exc}", file=sys.stderr)
         return 2
     except Exception as exc:
         print(f"FAILED: {exc}", file=sys.stderr)
