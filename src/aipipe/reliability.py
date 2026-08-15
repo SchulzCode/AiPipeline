@@ -28,14 +28,115 @@ class ParsedReview:
 
 
 _JSON_FENCE_RE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_JSON_DECODER = json.JSONDecoder()
+
+
+def _parse_review_payload(payload: dict) -> ParsedReview | None:
+    """Parse one JSON review envelope.
+
+    Return None for unrelated JSON objects so harmless diagnostic JSON in
+    surrounding prose is ignored rather than mistaken for a review verdict.
+    """
+
+    if "verdict" not in payload:
+        return None
+
+    verdict = str(payload.get("verdict") or "").strip().upper()
+    raw_findings = payload.get("findings") or []
+
+    if isinstance(raw_findings, str):
+        raw_findings = [raw_findings]
+    if not isinstance(raw_findings, list):
+        return ParsedReview(
+            ReviewVerdict.PROTOCOL_ERROR,
+            reason="Reviewer JSON has an invalid findings field.",
+        )
+
+    findings = tuple(
+        str(item).strip()
+        for item in raw_findings
+        if str(item).strip()
+    )
+
+    if verdict == "PASS" and not findings:
+        return ParsedReview(ReviewVerdict.PASS)
+    if verdict == "FINDINGS":
+        return ParsedReview(ReviewVerdict.FINDINGS, findings=findings)
+    if verdict == "PASS" and findings:
+        # A PASS carrying findings is contradictory and must never pass.
+        return ParsedReview(ReviewVerdict.FINDINGS, findings=findings)
+
+    return ParsedReview(
+        ReviewVerdict.PROTOCOL_ERROR,
+        reason="Reviewer JSON has no valid verdict.",
+    )
+
+
+def _embedded_review_payloads(raw: str) -> list[ParsedReview]:
+    """Extract review JSON objects even when an agent adds harmless prose.
+
+    json.JSONDecoder.raw_decode is used instead of a regex so braces and quoted
+    text inside findings are handled correctly. Only objects containing a
+    verdict field are considered review envelopes.
+    """
+
+    parsed: list[ParsedReview] = []
+    index = 0
+
+    while True:
+        start = raw.find("{", index)
+        if start < 0:
+            break
+
+        try:
+            payload, consumed = _JSON_DECODER.raw_decode(raw[start:])
+        except json.JSONDecodeError:
+            index = start + 1
+            continue
+
+        index = start + max(consumed, 1)
+        if not isinstance(payload, dict):
+            continue
+
+        review = _parse_review_payload(payload)
+        if review is not None:
+            parsed.append(review)
+
+    return parsed
+
+
+def _legacy_markers(raw: str) -> tuple[bool, bool, tuple[str, ...]]:
+    """Return explicit legacy PASS/FINDINGS markers from free-form output."""
+
+    lines = [line.strip() for line in raw.splitlines() if line.strip()]
+    normalized = [line.strip("*_` ").strip().upper() for line in lines]
+
+    has_findings = any(
+        line == "FINDINGS"
+        or line.startswith("FINDINGS:")
+        or line == "VERDICT: FINDINGS"
+        for line in normalized
+    )
+    has_pass = any(
+        line == "PASS" or line == "VERDICT: PASS"
+        for line in normalized
+    )
+    findings = tuple(
+        line[1:].strip()
+        for line in lines
+        if line.startswith("-") and line[1:].strip()
+    )
+    return has_pass, has_findings, findings
 
 
 def parse_review_verdict(output: str) -> ParsedReview:
     """Parse reviewer output without depending on a brittle free-form prefix.
 
-    New reviewers are asked for a small JSON envelope, but legacy PASS/FINDINGS
-    output remains supported so old agent versions and recorded fixtures keep
-    working. Ambiguous/conflicting output is never interpreted as PASS.
+    Reviewers are asked for a small JSON envelope, but legacy PASS/FINDINGS
+    output remains supported. A valid JSON envelope may be surrounded by
+    harmless explanatory prose because real agents occasionally ignore the
+    JSON-only formatting instruction. Ambiguous or conflicting output is never
+    interpreted as PASS.
     """
 
     raw = (output or "").strip()
@@ -45,6 +146,8 @@ def parse_review_verdict(output: str) -> ParsedReview:
             reason="Reviewer returned no verdict.",
         )
 
+    # Preserve support for a normal fenced JSON response while also allowing
+    # the more general embedded-object extractor below.
     candidate = _JSON_FENCE_RE.sub("", raw).strip()
     try:
         payload = json.loads(candidate)
@@ -52,46 +155,47 @@ def parse_review_verdict(output: str) -> ParsedReview:
         payload = None
 
     if isinstance(payload, dict):
-        verdict = str(payload.get("verdict") or "").strip().upper()
-        raw_findings = payload.get("findings") or []
-        if isinstance(raw_findings, str):
-            raw_findings = [raw_findings]
-        if not isinstance(raw_findings, list):
+        review = _parse_review_payload(payload)
+        if review is not None:
+            return review
+
+    embedded = _embedded_review_payloads(raw)
+    if embedded:
+        if any(item.verdict == ReviewVerdict.PROTOCOL_ERROR for item in embedded):
             return ParsedReview(
                 ReviewVerdict.PROTOCOL_ERROR,
-                reason="Reviewer JSON has an invalid findings field.",
+                reason="Reviewer response contained an invalid review JSON envelope.",
             )
-        findings = tuple(
-            str(item).strip()
-            for item in raw_findings
-            if str(item).strip()
-        )
-        if verdict == "PASS" and not findings:
-            return ParsedReview(ReviewVerdict.PASS)
-        if verdict == "FINDINGS" or findings:
-            return ParsedReview(ReviewVerdict.FINDINGS, findings=findings)
-        return ParsedReview(
-            ReviewVerdict.PROTOCOL_ERROR,
-            reason="Reviewer JSON has no valid verdict.",
-        )
 
-    lines = [line.strip() for line in raw.splitlines() if line.strip()]
-    upper = [line.upper() for line in lines]
-    has_findings = any(
-        line == "FINDINGS" or line.startswith("FINDINGS:")
-        for line in upper
-    )
-    has_pass = any(line == "PASS" for line in upper)
+        semantic_results = {
+            (item.verdict, item.findings)
+            for item in embedded
+        }
+        if len(semantic_results) != 1:
+            return ParsedReview(
+                ReviewVerdict.PROTOCOL_ERROR,
+                reason="Reviewer response contained conflicting JSON verdicts.",
+            )
 
+        review = embedded[0]
+        has_pass, has_findings, _ = _legacy_markers(raw)
+        if (
+            review.verdict == ReviewVerdict.PASS
+            and has_findings
+        ) or (
+            review.verdict == ReviewVerdict.FINDINGS
+            and has_pass
+        ):
+            return ParsedReview(
+                ReviewVerdict.PROTOCOL_ERROR,
+                reason="Reviewer response contained conflicting verdict markers.",
+            )
+        return review
+
+    has_pass, has_findings, findings = _legacy_markers(raw)
     if has_findings:
-        findings = tuple(
-            line[1:].strip()
-            for line in lines
-            if line.startswith("-") and line[1:].strip()
-        )
         return ParsedReview(ReviewVerdict.FINDINGS, findings=findings)
-
-    if upper and upper[-1] == "PASS" and has_pass:
+    if has_pass:
         return ParsedReview(ReviewVerdict.PASS)
 
     return ParsedReview(
