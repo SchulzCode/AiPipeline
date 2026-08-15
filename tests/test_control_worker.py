@@ -71,3 +71,58 @@ def test_stale_worker_is_blocked_and_project_released_without_discarding_state(t
         assert task.core_task_id == "T-0042"
         assert "preserved" in task.error
         assert s.get(Project, project_id).status == "IDLE"
+
+
+def test_heartbeat_once_refreshes_active_claim(tmp_path):
+    from datetime import datetime, timedelta, timezone
+
+    db = Database(settings(tmp_path)); db.create_all()
+    old_heartbeat = datetime.now(timezone.utc) - timedelta(minutes=1)
+    with db.session() as s:
+        project = Project(name="demo", local_path=str(tmp_path), status="BUSY")
+        s.add(project); s.flush()
+        task = ControlTask(
+            project_id=project.id,
+            prompt="one",
+            source="prompt",
+            status="IMPLEMENTING",
+            claimed_by="test-worker",
+            heartbeat_at=old_heartbeat,
+        )
+        s.add(task); s.flush(); task_id = task.id
+
+    worker = Worker(db, worker_id="test-worker")
+    assert worker._heartbeat_once(task_id) is True
+
+    with db.session() as s:
+        refreshed = s.get(ControlTask, task_id)
+        assert refreshed.heartbeat_at is not None
+        assert refreshed.heartbeat_at != old_heartbeat
+
+
+def test_heartbeat_loop_survives_one_transient_update_failure(monkeypatch, tmp_path):
+    db = Database(settings(tmp_path)); db.create_all()
+    worker = Worker(db, worker_id="test-worker")
+    attempts = 0
+
+    def heartbeat_once(_task_id):
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise RuntimeError("temporary database failure")
+        return False
+
+    class StopAfterTwoTicks:
+        def __init__(self):
+            self.calls = 0
+
+        def wait(self, _interval):
+            self.calls += 1
+            return self.calls > 2
+
+    monkeypatch.setattr(worker, "_heartbeat_once", heartbeat_once)
+    worker._heartbeat("task-id", StopAfterTwoTicks())
+
+    # The old implementation died after the first exception. The resilient
+    # loop must reach a second heartbeat attempt instead.
+    assert attempts == 2
