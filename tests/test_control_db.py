@@ -1,6 +1,6 @@
 from pathlib import Path
 
-from sqlalchemy import select
+from sqlalchemy import inspect, select, text
 
 from aipipe.control.config import ControlSettings
 from aipipe.control.db import Database
@@ -65,3 +65,62 @@ def test_project_model_roundtrip(tmp_path):
         project_id = project.id
     with db.session() as s:
         assert s.get(Project, project_id).model == "sonnet"
+
+
+def test_create_all_upgrades_existing_control_schema(tmp_path):
+    db = Database(settings(tmp_path))
+
+    # Simulate an installation created before model/failure/build columns were
+    # introduced. Other tables are allowed to be created normally by create_all.
+    with db.engine.begin() as connection:
+        connection.execute(text(
+            """
+            CREATE TABLE control_projects (
+                id VARCHAR(36) PRIMARY KEY,
+                name VARCHAR(255) NOT NULL,
+                default_branch VARCHAR(255) NOT NULL,
+                agent VARCHAR(32) NOT NULL,
+                enabled BOOLEAN NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+            """
+        ))
+        connection.execute(text(
+            """
+            CREATE TABLE control_tasks (
+                id VARCHAR(36) PRIMARY KEY,
+                project_id VARCHAR(36) NOT NULL,
+                source VARCHAR(32) NOT NULL,
+                prompt TEXT NOT NULL,
+                status VARCHAR(32) NOT NULL,
+                input_tokens INTEGER NOT NULL,
+                output_tokens INTEGER NOT NULL,
+                created_at DATETIME NOT NULL
+            )
+            """
+        ))
+
+    db.create_all()
+
+    project_columns = {
+        column["name"]
+        for column in inspect(db.engine).get_columns("control_projects")
+    }
+    task_columns = {
+        column["name"]
+        for column in inspect(db.engine).get_columns("control_tasks")
+    }
+
+    assert "model" in project_columns
+    assert "failure_category" in task_columns
+    assert "worker_build" in task_columns
+    assert db.schema_status()["ok"] is True
+
+
+def test_create_all_is_idempotent_after_migrations(tmp_path):
+    db = Database(settings(tmp_path))
+    db.create_all()
+    db.create_all()
+    assert db.ping() is True
+    assert db.schema_status() == {"ok": True, "missing": []}
