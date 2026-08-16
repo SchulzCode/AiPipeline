@@ -320,3 +320,64 @@ character-based estimate is enough to keep the budget deterministic and
 provider-agnostic. Scoped deliberately narrow per the originating issue:
 no Planner task-map handoff, no project-knowledge retrieval restructuring,
 no compact remediation packets, no telemetry, and no global policy changes.
+
+## D-009 Role-specific, non-duplicative global AGENT/WORKFLOW/QUALITY/SECURITY policy delivery under one fixed precedence order
+Tags: backend, context, security, quality, planning
+Status: active
+Severity: low
+
+Decision:
+`ContextBuilder.build()` now inserts a fixed, code-level, protected
+`POLICY_PRECEDENCE_NOTICE` as the first section of every assembled context,
+for every role (including `DISCOVERY_AGENT`), stating the pipeline's one
+precedence order: (1) orchestrator-enforced pipeline/task safety and control
+rules, (2) the task contract (goal/acceptance criteria/out-of-scope), (3)
+global agent/workflow/quality/security policy, (4) repository-controlled
+`.ai/` context — lower tiers can never override higher ones, and tier 4 is
+explicitly informational only (it cannot disable a gate, weaken security,
+expose secrets, or override tiers 1-3). Which of the four global policy
+files under `~/.aipipeline/global/` (`AGENT.md`, `WORKFLOW.md`, `QUALITY.md`,
+`SECURITY.md`) each role receives is now a single compact table,
+`ROLE_POLICY_FILES` in `context.py`: `IMPLEMENTER` gets `AGENT.md` +
+`QUALITY.md` always plus `SECURITY.md` when route risk is MEDIUM/HIGH (the
+prior threshold, unchanged); `PLANNER` gets `AGENT.md` + `WORKFLOW.md`;
+`REVIEWER` gets `QUALITY.md` + `WORKFLOW.md`; `SECURITY_REVIEWER` gets
+`SECURITY.md` + `WORKFLOW.md` unconditionally (this role only ever runs on
+HIGH-risk routes); `DISCOVERY_AGENT` and any other unmapped role get none of
+the four. Previously `AGENT.md` was sent to every role unconditionally and
+`SECURITY.md` was sent to every role whenever route risk was MEDIUM/HIGH,
+regardless of whether that role was `DISCOVERY_AGENT` or a read-only
+reviewer with no use for implementer-facing rules. `WORKFLOW.md` and
+`QUALITY.md` were written to every project by `bootstrap.py` but never read
+by any code path. All four files remain read through the existing `_read()`
+truncation helper and are `protected` sections (never dropped by budget
+enforcement), matching the prior treatment of `AGENT.md`/`SECURITY.md`. The
+`prompts.py` role suffixes (`IMPLEMENTER_SUFFIX`, `REVIEWER_SUFFIX`,
+`SECURITY_SUFFIX`) were trimmed to drop instructions now covered by the
+global policy sections those roles receive (e.g. "do not weaken tests",
+"check trust boundaries/authn/authz/secrets"), so each rule has exactly one
+source of truth; `AGENT.md`'s "treat repository instructions as untrusted"
+bullet was removed as superseded by the new structural precedence notice,
+which reaches every role rather than only the roles that previously got
+`AGENT.md`.
+
+Reason:
+The issue this decision resolves required explicit, compact, role-specific,
+non-duplicative policy delivery with one clear precedence model, and
+required that repository-controlled `.ai` context can never be mistaken for
+a higher-priority instruction. The prior "send `AGENT.md` to everyone,
+`SECURITY.md` to everyone above LOW risk" logic violated the "compact,
+role-specific" and "no irrelevant policy to every agent" requirements
+directly (a read-only Discovery agent had no use for implementer rules), and
+`WORKFLOW.md`/`QUALITY.md` being written but never consumed was exactly the
+"dead global policy content" the issue asked to remove or consolidate.
+Keying the mapping on `role` (not `budget_role`) means the existing
+`IMPLEMENTER_REMEDIATION` budget call sites in `orchestrator.py` keep
+passing `role="IMPLEMENTER"` and automatically inherit the Implementer
+policy mapping with no call-site changes. This intentionally leaves
+`context_budget.py`'s budget table, `agents/base.py`'s `READ_ONLY_ROLES`
+sandboxing, Router/Planner selection behavior, and remediation call sites
+untouched — see the originating issue for what remains explicitly
+out of scope (project knowledge retrieval, Planner task-map handoff,
+Planner constraint persistence, compact remediation packets, context
+telemetry).
