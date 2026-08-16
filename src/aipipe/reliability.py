@@ -235,6 +235,43 @@ def looks_transient(detail: str) -> bool:
     return any(marker in text for marker in _TRANSIENT_MARKERS)
 
 
+_CAPACITY_MARKERS = (
+    "usage limit",
+    "usage limits",
+    "session limit",
+    "session limits",
+    "quota exceeded",
+    "quota exhausted",
+    "insufficient quota",
+    "out of quota",
+    "resource_exhausted",
+    "credit balance is too low",
+    "insufficient credits",
+    "out of credits",
+    "capacity exceeded",
+    "over capacity",
+    "at capacity",
+    "plan limit",
+    "monthly limit",
+    "weekly limit",
+    "reached your usage limit",
+    "upgrade your plan",
+)
+
+
+def looks_like_capacity_exhaustion(detail: str) -> bool:
+    """Recognize provider/session/quota/capacity exhaustion signals.
+
+    Distinct from `looks_transient`, which covers retryable network/HTTP
+    errors, and from reviewer malformed-output detection in
+    `parse_review_verdict`, which is unrelated agent-output content. A
+    capacity signal means "stop retrying now, the provider has no more
+    budget to give this attempt" rather than "retry with backoff."
+    """
+    text = (detail or "").lower()
+    return any(marker in text for marker in _CAPACITY_MARKERS)
+
+
 T = TypeVar("T")
 
 
