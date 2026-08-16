@@ -376,6 +376,7 @@ class Orchestrator:
                     "IMPLEMENTER",
                     self.git.diff(worktree),
                     feedback,
+                    budget_role="IMPLEMENTER_REMEDIATION",
                 )
                 + "\n\n"
                 + IMPLEMENTER_SUFFIX
@@ -541,6 +542,7 @@ class Orchestrator:
                     "IMPLEMENTER",
                     diff,
                     raw_output,
+                    budget_role="IMPLEMENTER_REMEDIATION",
                 )
                 + "\n\n"
                 + IMPLEMENTER_SUFFIX
@@ -1263,6 +1265,7 @@ class Orchestrator:
                         "IMPLEMENTER",
                         self.git.diff(worktree),
                         ci_context,
+                        budget_role="IMPLEMENTER_REMEDIATION",
                     )
                     + "\n\n"
                     + IMPLEMENTER_SUFFIX

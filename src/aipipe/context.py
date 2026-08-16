@@ -1,11 +1,34 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from pathlib import Path
 
+from .context_budget import budget_for
 from .models import TaskContract
 from .repo_index import RepoIndexCache, render_repo_index
 from .util import truncate
+
+TRUNCATION_NOTICE = (
+    "# Context Truncation Notice\n"
+    "Some optional context below (repository index, project knowledge, prior "
+    "decisions/learnings, diffs, and/or logs) was shortened or omitted to fit "
+    "this run's context budget. The task goal, acceptance criteria, "
+    "out-of-scope constraints, and safety/quality rules above are complete "
+    "and were never truncated. Use your file-inspection tools to read, grep, "
+    "or glob the worktree directly for anything you need beyond what is "
+    "shown here."
+)
+
+
+@dataclass
+class _Section:
+    text: str
+    protected: bool
+    # Lower drop_priority sections are truncated/dropped first when the
+    # assembled context exceeds its total budget. Ignored for protected
+    # sections, which are never touched.
+    drop_priority: int = 0
 
 
 class ContextBuilder:
@@ -43,40 +66,110 @@ class ContextBuilder:
         diff: str = "",
         findings: str = "",
         plan: str = "",
+        *,
+        budget_role: str | None = None,
     ) -> str:
         scopes = task.route.scopes if task.route else ["general"]
-        parts = [
-            f"# Role\n{role}\n",
-            f"# Task\nID: {task.id}\nGoal: {truncate(task.goal, 16000)}\n",
-            "# Acceptance Criteria\n" + "\n".join(f"- {x}" for x in task.acceptance_criteria),
+        sections: list[_Section] = [
+            _Section(f"# Role\n{role}\n", protected=True),
+            _Section(f"# Task\nID: {task.id}\nGoal: {truncate(task.goal, 16000)}\n", protected=True),
+            _Section(
+                "# Acceptance Criteria\n" + "\n".join(f"- {x}" for x in task.acceptance_criteria),
+                protected=True,
+            ),
         ]
+        if task.out_of_scope:
+            sections.append(
+                _Section(
+                    "# Out of Scope\n" + "\n".join(f"- {x}" for x in task.out_of_scope),
+                    protected=True,
+                )
+            )
         if plan:
-            parts.append("# Implementation Plan\n" + truncate(plan, 10000))
+            sections.append(_Section("# Implementation Plan\n" + truncate(plan, 10000), protected=True))
         agent_rules = self._read(self.global_root / "AGENT.md", 5000)
         project = self._read(repo / ".ai" / "PROJECT.md", 8000)
         if agent_rules:
-            parts.append("# Global Agent Rules\n" + agent_rules)
+            sections.append(_Section("# Global Agent Rules\n" + agent_rules, protected=True))
         if project:
-            parts.append("# Project Context\n" + project)
+            sections.append(_Section("# Project Context\n" + project, protected=False, drop_priority=2))
         if self.index_cache is not None:
             index = self.index_cache.get_or_build(repo)
             if index is not None:
                 rendered = render_repo_index(index)
                 if rendered:
-                    parts.append("# Repository Index\n" + rendered)
+                    sections.append(
+                        _Section("# Repository Index\n" + rendered, protected=False, drop_priority=1)
+                    )
         decisions = self._relevant_entries(repo / ".ai" / "DECISIONS.md", scopes)
         learnings = self._relevant_entries(repo / ".ai" / "LEARNINGS.md", scopes)
         global_learnings = self._relevant_entries(self.global_root / "LEARNINGS.md", scopes, 4000)
         if decisions:
-            parts.append("# Relevant Decisions\n" + decisions)
+            sections.append(_Section("# Relevant Decisions\n" + decisions, protected=False, drop_priority=0))
         if learnings or global_learnings:
-            parts.append("# Relevant Learnings\n" + "\n".join(x for x in [learnings, global_learnings] if x))
+            sections.append(
+                _Section(
+                    "# Relevant Learnings\n" + "\n".join(x for x in [learnings, global_learnings] if x),
+                    protected=False,
+                    drop_priority=0,
+                )
+            )
         if task.route and task.route.risk.value in {"MEDIUM", "HIGH"}:
             security = self._read(self.global_root / "SECURITY.md", 8000)
             if security:
-                parts.append("# Security Rules\n" + security)
+                sections.append(_Section("# Security Rules\n" + security, protected=True))
         if diff:
-            parts.append("# Current Diff\n```diff\n" + truncate(diff, 18000) + "\n```")
+            sections.append(
+                _Section(
+                    "# Current Diff\n```diff\n" + truncate(diff, 18000) + "\n```",
+                    protected=False,
+                    drop_priority=4,
+                )
+            )
         if findings:
-            parts.append("# Findings To Address\n" + truncate(findings, 8000))
+            sections.append(
+                _Section("# Findings To Address\n" + truncate(findings, 8000), protected=False, drop_priority=3)
+            )
+
+        budget = budget_for(budget_role or role, task.route.context_class if task.route else None)
+        truncated = self._enforce_budget(sections, budget.total_chars)
+
+        parts = [s.text for s in sections if s.text]
+        if truncated:
+            parts.append(TRUNCATION_NOTICE)
         return "\n\n".join(parts)
+
+    @staticmethod
+    def _enforce_budget(sections: list[_Section], total_chars: int) -> bool:
+        def assembled_len() -> int:
+            texts = [s.text for s in sections if s.text]
+            if not texts:
+                return 0
+            return sum(len(t) for t in texts) + 2 * (len(texts) - 1)
+
+        excess = assembled_len() - total_chars
+        if excess <= 0:
+            return False
+
+        optional_indices = sorted(
+            (i for i, s in enumerate(sections) if not s.protected),
+            key=lambda i: sections[i].drop_priority,
+        )
+        truncated_any = False
+        for i in optional_indices:
+            if excess <= 0:
+                break
+            section = sections[i]
+            text_len = len(section.text)
+            if text_len == 0:
+                continue
+            if text_len <= excess:
+                excess -= text_len
+                section.text = ""
+                truncated_any = True
+                continue
+            new_limit = max(0, text_len - excess)
+            section.text = truncate(section.text, new_limit) if new_limit > 0 else ""
+            excess = 0
+            truncated_any = True
+        return truncated_any
