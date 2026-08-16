@@ -223,3 +223,49 @@ classifier only fires on `not result.ok` output, deliberately leaving
 (a different failure surface, for reviewer roles only) untouched, per the
 issue's explicit requirement that genuine malformed agent output must not
 be reclassified as capacity failure.
+
+## D-007 Deterministic, disk-cached repository index feeds `ContextBuilder`, never gates a task
+Tags: backend, context, planning, performance
+Status: active
+Severity: low
+
+Decision:
+Added `repo_index.py`: `build_repo_index(repo, commit_sha)` summarizes a
+repository using only `git ls-files`, filesystem metadata, and bounded
+regex-based symbol extraction (no LLM call, no network access) into a
+`RepoIndex` (tracked files, detected language/manifest, test-file
+locations, per-file top-level symbols), every list capped
+(`MAX_TRACKED_FILES`, `MAX_TEST_LOCATIONS`, `MAX_SYMBOL_FILES`,
+`MAX_SYMBOLS_PER_FILE`) and the rendered text truncated
+(`RENDER_LIMIT`). Generated/vendor/cache/build directories
+(`node_modules`, `vendor`, `dist`, `build`, `.venv`, `__pycache__`, ...)
+are excluded by path-component name regardless of git-tracked status.
+`RepoIndexCache` keys the cache by `(git rev-parse --git-common-dir,
+commit_sha)` — the common-dir keys it per canonical repository so every
+worktree of the same project shares one cache, and the commit SHA
+invalidates it the moment the base branch advances — with an in-memory
+layer plus a best-effort JSON file under `<AIPIPE_HOME>/index/`, entirely
+outside any Git worktree. `ContextBuilder` gained an optional
+`index_cache` constructor argument; when set, `build()` appends a
+`# Repository Index` section only if `get_or_build()` returns a non-None
+result. `RepoIndexCache.get_or_build` catches every exception and returns
+`None` on any failure (missing git binary, non-repository path, unreadable
+file, full disk, ...). `Orchestrator` is the only caller that passes an
+`index_cache`; `agents/`, gating, security, CI, Git, and merge logic are
+untouched.
+
+Reason:
+The issue asked for a bounded, deterministic index so Planner/Implementer
+agents stop re-deriving basic repository structure from scratch on every
+run, without introducing an LLM summarizer, a vector database, or any
+change to existing fresh-agent/review/security/CI/merge behavior. Keying
+the cache by git's own common-dir (rather than a worktree path, which is
+unique per task) is what makes the cache actually pay off: worktrees are
+ephemeral per task, but the common-dir is stable for the life of a cloned
+project, so a second task against an unchanged base branch gets a cache
+hit instead of a rebuild. Making `index_cache` an optional constructor
+argument (default `None`) rather than a required one means existing
+`ContextBuilder(...)` call sites and tests keep working unchanged, and the
+"must never block a valid task" requirement is enforced structurally by
+`get_or_build`'s blanket `except Exception: return None` rather than by
+callers remembering to handle a specific failure mode.
