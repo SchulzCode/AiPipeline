@@ -4,12 +4,14 @@ import re
 from pathlib import Path
 
 from .models import TaskContract
+from .repo_index import RepoIndexCache, render_repo_index
 from .util import truncate
 
 
 class ContextBuilder:
-    def __init__(self, global_root: Path):
+    def __init__(self, global_root: Path, index_cache: RepoIndexCache | None = None):
         self.global_root = global_root
+        self.index_cache = index_cache
 
     @staticmethod
     def _read(path: Path, limit: int = 10000) -> str:
@@ -56,6 +58,12 @@ class ContextBuilder:
             parts.append("# Global Agent Rules\n" + agent_rules)
         if project:
             parts.append("# Project Context\n" + project)
+        if self.index_cache is not None:
+            index = self.index_cache.get_or_build(repo)
+            if index is not None:
+                rendered = render_repo_index(index)
+                if rendered:
+                    parts.append("# Repository Index\n" + rendered)
         decisions = self._relevant_entries(repo / ".ai" / "DECISIONS.md", scopes)
         learnings = self._relevant_entries(repo / ".ai" / "LEARNINGS.md", scopes)
         global_learnings = self._relevant_entries(self.global_root / "LEARNINGS.md", scopes, 4000)

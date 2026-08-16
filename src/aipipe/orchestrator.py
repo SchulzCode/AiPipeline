@@ -27,6 +27,7 @@ from .models import ContextClass, FailureCategory, Risk, Route, TaskContract, Ta
 from .prompts import DISCOVERY_SUFFIX, IMPLEMENTER_SUFFIX, PLANNER_SUFFIX, REVIEWER_SUFFIX, SECURITY_SUFFIX
 from .quality import QualityEngine
 from .reliability import ReviewVerdict, looks_like_capacity_exhaustion, looks_transient, parse_review_verdict
+from .repo_index import RepoIndexCache
 from .router import acceptance_from_text, planner_required, route_task
 from .security import SecurityEngine, scan_added_diff
 from .setup_engine import SetupEngine
@@ -86,7 +87,8 @@ class Orchestrator:
             read_attempts=self.config.external_attempts,
             backoff_seconds=self.config.external_backoff_seconds,
         )
-        self.context = ContextBuilder(self.home / "global")
+        self.index_cache = RepoIndexCache(self.home / "index")
+        self.context = ContextBuilder(self.home / "global", self.index_cache)
         self.agent = build_agent(
             self.config.agent,
             self.config,
