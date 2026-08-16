@@ -269,3 +269,54 @@ argument (default `None`) rather than a required one means existing
 "must never block a valid task" requirement is enforced structurally by
 `get_or_build`'s blanket `except Exception: return None` rather than by
 callers remembering to handle a specific failure mode.
+
+## D-008 Role/`ContextClass`-aware total context budget enforced by section priority, not a fixed per-section limit
+Tags: backend, context, planning, reliability
+Status: active
+Severity: low
+
+Decision:
+Added `context_budget.py`: a static `ROLE_TOTAL_BUDGET_TOKENS` table (one
+total assembled-context token budget per role x `ContextClass`, covering
+`PLANNER`, `IMPLEMENTER`, `IMPLEMENTER_REMEDIATION`, `REVIEWER`,
+`SECURITY_REVIEWER`) plus a `DEFAULT_TOTAL_BUDGET_TOKENS` fallback for roles
+without a dedicated entry (`ROUTER`, `DISCOVERY_AGENT`). `estimate_tokens`
+is a deterministic `ceil(len(text) / CHARS_PER_TOKEN)` estimate
+(`CHARS_PER_TOKEN = 3`, deliberately below the ~4 chars/token real-tokenizer
+average so the estimate is conservative) — no tokenizer, network, or LLM
+call. `ContextBuilder.build()` tags every section `protected` (Role, Task
+goal, Acceptance Criteria, Out of Scope, Implementation Plan, Global Agent
+Rules, Security Rules) or `optional` with a `drop_priority` (decisions and
+learnings dropped first, then repository index, then project knowledge,
+then CI/review findings, diff kept longest). After assembling all sections
+(each still capped by its pre-existing per-section `truncate()` limit), it
+computes one role/`ContextClass` budget via `budget_for()` and, only if the
+assembled size exceeds it, drops/truncates optional sections in
+`drop_priority` order until back under budget or optional content is
+exhausted — protected sections are never touched, so the task contract can
+never be displaced. A fixed `TRUNCATION_NOTICE` is appended (outside the
+budget calculation) whenever anything was shortened, telling the agent to
+use its file tools to inspect the worktree directly. `build()` gained a
+keyword-only `budget_role` argument (defaults to `role`) so the three
+`IMPLEMENTER` remediation call sites in `orchestrator.py` (gate repair,
+review repair, CI repair) can select the smaller
+`IMPLEMENTER_REMEDIATION` budget without changing the `role` string used
+for agent sandboxing/event naming.
+
+Reason:
+The previous implementation only had fixed per-section character caps
+(e.g. diff always up to 18000 chars, findings up to 8000) with no total
+ceiling and no concept of role or task size — a `SMALL` bug fix and a
+`DEEP` refactor got the same worst-case prompt size, and a task with several
+large-but-individually-capped sections (diff + findings + project + decisions
++ learnings) could still assemble a very large combined prompt. Enforcing
+one total budget by dropping lowest-priority optional content first (rather
+than truncating every section proportionally) keeps the protected task
+contract intact even under pathological combined input, satisfies the
+"agents must still be able to inspect the worktree" requirement without
+touching agent tool sandboxing (`agents/base.py`'s `READ_ONLY_ROLES` is
+untouched), and needed no LLM call or real tokenizer: a conservative
+character-based estimate is enough to keep the budget deterministic and
+provider-agnostic. Scoped deliberately narrow per the originating issue:
+no Planner task-map handoff, no project-knowledge retrieval restructuring,
+no compact remediation packets, no telemetry, and no global policy changes.
