@@ -146,6 +146,16 @@ class GitHubAdapter:
             raise self._command_error("Failed to list GitHub pull requests", result)
         return self._parse_json_list(result.stdout, "gh pr list")
 
+    def list_labels(self, limit: int = 200) -> list[str]:
+        result = self._run_read(
+            ["gh", "label", "list", "--limit", str(limit), "--json", "name"],
+            self.repo,
+        )
+        if not result.ok:
+            raise self._command_error("Failed to list GitHub repository labels", result)
+        data = self._parse_json_list(result.stdout, "gh label list")
+        return [str(item["name"]) for item in data if item.get("name")]
+
     def _find_issue_by_marker(self, marker: str) -> dict | None:
         for issue in self.list_issues(state="all", limit=200):
             if marker in str(issue.get("body") or ""):

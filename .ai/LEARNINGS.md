@@ -34,3 +34,15 @@
   ("Unexpected token Delim('*')" in `next build`'s CSS-optimization pass).
   Avoid `*`-suffixed CSS-variable-looking text in comments near an `@theme`
   block; spell out examples instead (`--font-sans`, not `--font-*`).
+- Feature-discovery issue creation (`Orchestrator.run_discovery` in
+  `orchestrator.py`) filters each candidate's AI-proposed labels against
+  `GitHubAdapter.list_labels()` (repo's real labels) before calling
+  `create_issue`, rather than passing proposed labels straight through: `gh
+  issue create --label <name>` fails outright if any one label doesn't
+  already exist on the repo, and discovery must never auto-create arbitrary
+  repository labels. A label-list lookup failure is treated the same as "no
+  labels exist" (issue still gets created, unlabeled) rather than blocking
+  or failing the candidate; only the underlying `create_issue` call itself
+  failing marks a candidate `"failed"`. Follow this same
+  fetch-then-filter-then-create pattern for any other GitHub metadata
+  (e.g. milestones, assignees) that discovery might attach to issues later.

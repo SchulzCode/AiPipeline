@@ -873,12 +873,40 @@ class Orchestrator:
 
             max_new_issues = max(0, min(self.config.discovery_max_new_issues, max_candidates))
             creation_targets = [c for c in candidates if c.status == "proposed"][:max_new_issues]
+
+            # Repository labels are looked up once per run. Missing labels
+            # (or an unavailable label list entirely) must never block issue
+            # creation, and discovery never creates new repository labels -
+            # proposed labels are only ever a filtered subset of what already
+            # exists.
+            available_labels: set[str] = set()
+            if creation_targets:
+                try:
+                    available_labels = set(self.github.list_labels())
+                except Exception as exc:
+                    self.state.event(
+                        task_db_id,
+                        "DISCOVERY_LABELS_UNAVAILABLE",
+                        truncate(
+                            f"Unable to list repository labels; issues will be created without labels: {exc}",
+                            2000,
+                        ),
+                    )
+
             for candidate in creation_targets:
                 try:
+                    valid_labels = [label for label in candidate.labels if label in available_labels]
+                    skipped_labels = [label for label in candidate.labels if label not in available_labels]
+                    if skipped_labels:
+                        self.state.event(
+                            task_db_id,
+                            "DISCOVERY_LABELS_SKIPPED",
+                            json.dumps({"key": candidate.key, "skipped": skipped_labels}),
+                        )
                     issue = self.github.create_issue(
                         candidate.title,
                         issue_body(candidate),
-                        candidate.labels,
+                        valid_labels,
                         DISCOVERY_MARKER.format(key=candidate.key),
                     )
                     candidate.status = "created"
