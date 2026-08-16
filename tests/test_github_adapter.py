@@ -262,6 +262,35 @@ def test_create_issue_raises_when_creation_fails_and_no_reconciliation_possible(
         assert "permission denied" in str(exc)
 
 
+def test_list_labels_returns_parsed_label_names(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(github_mod, "require_binary", lambda _: None)
+    seen = []
+
+    def fake_run(cmd, cwd, timeout=1200, **kwargs):
+        seen.append(cmd)
+        return _result(cmd, json.dumps([{"name": "bug"}, {"name": "enhancement"}]))
+
+    monkeypatch.setattr(github_mod, "run", fake_run)
+    labels = GitHubAdapter(tmp_path).list_labels()
+    assert labels == ["bug", "enhancement"]
+    cmd = next(c for c in seen if c[:3] == ["gh", "label", "list"])
+    assert "--json" in cmd and "name" in cmd
+
+
+def test_list_labels_raises_on_command_failure(monkeypatch, tmp_path: Path):
+    monkeypatch.setattr(github_mod, "require_binary", lambda _: None)
+
+    def fake_run(cmd, cwd, timeout=1200, **kwargs):
+        return _result(cmd, returncode=1, stderr="not authenticated")
+
+    monkeypatch.setattr(github_mod, "run", fake_run)
+    try:
+        GitHubAdapter(tmp_path, read_attempts=1).list_labels()
+        assert False, "expected RuntimeError"
+    except RuntimeError as exc:
+        assert "not authenticated" in str(exc)
+
+
 def test_transient_read_is_retried_but_bounded(monkeypatch, tmp_path: Path):
     monkeypatch.setattr(github_mod, "require_binary", lambda _: None)
     monkeypatch.setattr(github_mod.time, "sleep", lambda _: None)

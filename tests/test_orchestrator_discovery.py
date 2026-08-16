@@ -52,12 +52,24 @@ class _FailingPrepareGit(_FakeGit):
 
 
 class _FakeGitHub:
-    def __init__(self, issues=None, prs=None, create_results=None, list_error=None):
+    def __init__(
+        self,
+        issues=None,
+        prs=None,
+        create_results=None,
+        list_error=None,
+        labels=None,
+        label_error=None,
+    ):
         self._issues = issues or []
         self._prs = prs or []
         self._create_results = create_results or {}
         self._list_error = list_error
+        self._labels = ["ui", "reporting"] if labels is None else list(labels)
+        self._label_error = label_error
         self.created_titles: list[str] = []
+        self.created_labels: dict[str, list[str]] = {}
+        self.list_labels_calls = 0
 
     def list_issues(self, state="all", limit=200):
         if self._list_error:
@@ -67,8 +79,15 @@ class _FakeGitHub:
     def list_recent_prs(self, state="all", limit=100):
         return self._prs
 
+    def list_labels(self, limit=200):
+        self.list_labels_calls += 1
+        if self._label_error:
+            raise self._label_error
+        return list(self._labels)
+
     def create_issue(self, title, body, labels, marker):
         self.created_titles.append(title)
+        self.created_labels[title] = list(labels)
         outcome = self._create_results.get(title)
         if isinstance(outcome, Exception):
             raise outcome
@@ -321,6 +340,119 @@ def test_duplicate_lookup_failure_still_preserves_generated_candidates(tmp_path)
     kinds = [kind for _, kind, _ in orch.state.events]
     assert "DISCOVERY_CANDIDATES" in kinds
     assert orch.state.statuses[-1][0] == "BLOCKED"
+
+
+# --- repository-aware label handling ---------------------------------------------
+
+
+def test_issue_created_with_all_proposed_labels_when_all_exist(tmp_path):
+    github = _FakeGitHub(issues=[], prs=[], labels=["ui", "reporting"])
+    orch = _make_orchestrator(
+        tmp_path,
+        [_agent_result(ok=True, output=_candidates_output([DARK_MODE]))],
+        github=github,
+    )
+
+    result = orch.run_discovery("T-0001")
+
+    assert len(result.created) == 1
+    assert not result.failed
+    assert github.created_labels["Add dark mode"] == ["ui"]
+    kinds = [kind for _, kind, _ in orch.state.events]
+    assert "DISCOVERY_LABELS_SKIPPED" not in kinds
+
+
+def test_issue_created_with_only_the_subset_of_labels_that_exist(tmp_path):
+    # DARK_MODE proposes "ui", CSV_EXPORT proposes "reporting"; only "ui"
+    # exists on the repository, so "reporting" must be dropped without
+    # failing the CSV export candidate.
+    github = _FakeGitHub(issues=[], prs=[], labels=["ui"])
+    orch = _make_orchestrator(
+        tmp_path,
+        [_agent_result(ok=True, output=_candidates_output([DARK_MODE, CSV_EXPORT]))],
+        github=github,
+    )
+
+    result = orch.run_discovery("T-0001")
+
+    assert len(result.created) == 2
+    assert not result.failed
+    assert github.created_labels["Add dark mode"] == ["ui"]
+    assert github.created_labels["Add CSV export"] == []
+
+    skipped_events = [
+        json.loads(detail) for _, kind, detail in orch.state.events if kind == "DISCOVERY_LABELS_SKIPPED"
+    ]
+    assert any(event["skipped"] == ["reporting"] for event in skipped_events)
+
+
+def test_issue_still_created_when_no_proposed_labels_exist_on_repository(tmp_path):
+    github = _FakeGitHub(issues=[], prs=[], labels=["unrelated-label"])
+    orch = _make_orchestrator(
+        tmp_path,
+        [_agent_result(ok=True, output=_candidates_output([DARK_MODE, CSV_EXPORT]))],
+        github=github,
+    )
+
+    result = orch.run_discovery("T-0001")
+
+    assert len(result.created) == 2
+    assert not result.failed
+    assert github.created_labels["Add dark mode"] == []
+    assert github.created_labels["Add CSV export"] == []
+
+    skipped_events = [
+        json.loads(detail) for _, kind, detail in orch.state.events if kind == "DISCOVERY_LABELS_SKIPPED"
+    ]
+    assert {event["key"] for event in skipped_events} == {c.key for c in result.created}
+
+
+def test_label_lookup_failure_does_not_prevent_issue_creation(tmp_path):
+    github = _FakeGitHub(issues=[], prs=[], label_error=RuntimeError("could not resolve to a Repository"))
+    orch = _make_orchestrator(
+        tmp_path,
+        [_agent_result(ok=True, output=_candidates_output([DARK_MODE]))],
+        github=github,
+    )
+
+    result = orch.run_discovery("T-0001")
+
+    assert orch.state.statuses[-1] == ("DONE", None)
+    assert len(result.created) == 1
+    assert not result.failed
+    assert github.created_labels["Add dark mode"] == []
+
+    kinds = [kind for _, kind, _ in orch.state.events]
+    assert "DISCOVERY_LABELS_UNAVAILABLE" in kinds
+    assert "DISCOVERY_ISSUE_FAILED" not in kinds
+
+
+def test_genuine_issue_creation_failure_is_still_reported_as_failed_with_valid_labels(tmp_path):
+    github = _FakeGitHub(
+        issues=[],
+        prs=[],
+        labels=["ui"],
+        create_results={"Add dark mode": RuntimeError("could not add label: 'backend' not found")},
+    )
+    orch = _make_orchestrator(
+        tmp_path,
+        [_agent_result(ok=True, output=_candidates_output([DARK_MODE]))],
+        github=github,
+    )
+
+    result = orch.run_discovery("T-0001")
+
+    assert orch.state.statuses[-1] == ("DONE", None)
+    assert not result.created
+    assert len(result.failed) == 1
+    assert result.failed[0].title == "Add dark mode"
+    assert result.failed[0].error
+    # The candidate's only proposed label ("ui") did exist on the repository,
+    # so this failure is a genuine GitHub error, not a label-filtering bug.
+    assert github.created_labels["Add dark mode"] == ["ui"]
+
+    kinds = [kind for _, kind, _ in orch.state.events]
+    assert "DISCOVERY_ISSUE_FAILED" in kinds
 
 
 # --- budget enforcement -----------------------------------------------------------
