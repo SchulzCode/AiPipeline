@@ -1,7 +1,13 @@
 import pytest
 
 import aipipe.reliability as reliability
-from aipipe.reliability import ReviewVerdict, parse_review_verdict, retry_transient
+from aipipe.reliability import (
+    ReviewVerdict,
+    looks_like_capacity_exhaustion,
+    looks_transient,
+    parse_review_verdict,
+    retry_transient,
+)
 
 
 def test_json_pass_verdict():
@@ -119,3 +125,46 @@ def test_retry_transient_does_not_retry_permanent_error(monkeypatch):
     with pytest.raises(RuntimeError, match="permission denied"):
         retry_transient(operation, attempts=3, initial_delay=0)
     assert attempts == 1
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "Error: usage limit reached. Please try again later or upgrade your plan.",
+        "Session limit exceeded for this account.",
+        "quota exceeded for this billing period",
+        "insufficient quota: please check your plan and billing details",
+        "429 resource_exhausted: rate limit for requests",
+        "Your credit balance is too low to continue.",
+        "You have hit your monthly limit for this model.",
+        "STDERR:\nweekly limit reached, resets in 3 days",
+    ],
+)
+def test_looks_like_capacity_exhaustion_recognizes_capacity_signals(detail):
+    assert looks_like_capacity_exhaustion(detail) is True
+
+
+@pytest.mark.parametrize(
+    "detail",
+    [
+        "",
+        "SyntaxError: unexpected token in generated patch",
+        "Reviewer response did not contain an unambiguous verdict.",
+        "connection reset by peer",
+        "HTTP 503 temporarily unavailable",
+        "permission denied writing to /etc/passwd",
+    ],
+)
+def test_looks_like_capacity_exhaustion_ignores_non_capacity_errors(detail):
+    assert looks_like_capacity_exhaustion(detail) is False
+
+
+def test_capacity_and_transient_classifiers_are_independent():
+    # A generic rate-limit/HTTP signal (retryable, used for external API
+    # calls) must not also be read as provider-capacity exhaustion (the
+    # implementer's "stop retrying now" signal), and vice versa.
+    assert looks_transient("HTTP 429 rate limit") is True
+    assert looks_like_capacity_exhaustion("HTTP 429 rate limit") is False
+
+    assert looks_like_capacity_exhaustion("usage limit reached") is True
+    assert looks_transient("usage limit reached") is False

@@ -180,3 +180,46 @@ pipeline-config fields (YAML) in two different PATCH endpoints reflects a
 real, pre-existing split in what the executor actually reads — collapsing
 them into one form would have shipped a control that looked functional but
 wasn't.
+
+## D-006 Provider-capacity is a distinct `FailureCategory`, classified by output-text markers, separate from `looks_transient`
+Tags: backend, orchestrator, reliability, resumability
+Status: active
+Severity: low
+
+Decision:
+Added `FailureCategory.PROVIDER_CAPACITY` (`models.py`) and
+`reliability.looks_like_capacity_exhaustion(detail)`, a marker-substring
+classifier patterned after the existing `looks_transient` but with a
+disjoint marker set (usage/session/quota/credit/plan-limit phrasing, not
+HTTP/network retry phrasing). The implementer's bounded retry loop was
+extracted from `Orchestrator.run()` into `Orchestrator._run_implementer`
+(matching the existing `_run_planner`/`_run_discovery_agent` shape) so it
+is unit-testable in isolation. On a failed attempt, if the output matches
+a capacity signal, the loop stops immediately (`break`) instead of
+consuming the remaining `implementation_attempts` budget, and raises
+`PipelineBlocked(..., FailureCategory.PROVIDER_CAPACITY)`. Both the
+capacity path and the pre-existing `AGENT_PROTOCOL` no-diff path now check
+`self.git.diff(worktree)` before reporting failure, so a nonzero-exit
+attempt that already produced a real repository diff is never reported as
+"did not produce a valid repository change" — the message says the diff
+was preserved instead. Nothing needed to change to actually *preserve* the
+worktree: cleanup was already gated on `TaskStatus.DONE`, never run on a
+`BLOCKED`/`FAILED` exit.
+
+Reason:
+This is split 1/8 of a larger resumability effort (issue #37, split from
+#9); later splits are expected to build on `PROVIDER_CAPACITY` and the
+preserved diff to actually resume a task instead of just blocking it, so
+the classification needed to be a real distinct category now rather than
+folded into `AGENT_PROTOCOL`. Capacity/quota text markers are kept in a
+separate function and marker list from `looks_transient` on purpose:
+`looks_transient` means "retry with backoff, this is a flaky network/HTTP
+error" (used for read-only external API calls), while capacity exhaustion
+means the opposite — "stop retrying now, an immediate retry cannot
+succeed." Conflating the two marker sets would make a capacity exhaustion
+message trigger network-style backoff retries, and vice versa. The
+classifier only fires on `not result.ok` output, deliberately leaving
+`reliability.parse_review_verdict`'s malformed-JSON/no-verdict detection
+(a different failure surface, for reviewer roles only) untouched, per the
+issue's explicit requirement that genuine malformed agent output must not
+be reclassified as capacity failure.

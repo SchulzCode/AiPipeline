@@ -43,17 +43,39 @@ class _MutatingGit:
         return value
 
 
-def _orchestrator(review_attempts=2, planner_attempts=2):
+def _orchestrator(review_attempts=2, planner_attempts=2, implementation_attempts=3):
     orch = Orchestrator.__new__(Orchestrator)
     orch.config = SimpleNamespace(
         review_attempts=review_attempts,
         verification_attempts=2,
         planner_attempts=planner_attempts,
+        implementation_attempts=implementation_attempts,
     )
     orch.context = _Context()
     orch.git = _Git()
     orch.state = _State()
     return orch
+
+
+class _ImplementerGit:
+    """A `.changed_files()`/`.diff()` fake for implementer-loop tests.
+
+    `changed_files` drives the loop's per-attempt success check (mirrors
+    `git diff --name-only`); `diff_value` drives the final
+    "does a repository diff already exist" preservation check (mirrors
+    `git diff`, which also picks up untracked files). The two are tracked
+    independently since the real GitManager methods differ in what they see.
+    """
+
+    def __init__(self, changed_files=(), diff_value=""):
+        self._changed_files = list(changed_files)
+        self._diff_value = diff_value
+
+    def changed_files(self, worktree):
+        return list(self._changed_files)
+
+    def diff(self, worktree):
+        return self._diff_value
 
 
 def _agent_result(ok=True, output="fixed"):
@@ -295,3 +317,118 @@ def test_planner_mutating_the_worktree_is_blocked_as_state_inconsistency():
 
     assert exc.value.category == FailureCategory.STATE_INCONSISTENCY
     assert "read-only" in str(exc.value)
+
+
+def test_implementer_succeeds_on_first_clean_attempt():
+    orch = _orchestrator(implementation_attempts=3)
+    orch.git = _ImplementerGit(changed_files=["src/thing.py"])
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        return _agent_result(ok=True, output="done")
+
+    orch._agent_run = agent_run
+
+    orch._run_implementer(1, "context", SimpleNamespace())
+
+    assert calls == [1]
+
+
+def test_implementer_retries_a_plain_failure_then_succeeds():
+    orch = _orchestrator(implementation_attempts=3)
+    orch.git = _ImplementerGit(changed_files=[])
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        if attempt == 1:
+            return _agent_result(ok=False, output="unexpected internal error")
+        orch.git._changed_files = ["src/thing.py"]
+        return _agent_result(ok=True, output="done")
+
+    orch._agent_run = agent_run
+
+    orch._run_implementer(1, "context", SimpleNamespace())
+
+    assert calls == [1, 2]
+
+
+def test_implementer_blocks_after_exhausting_retries_with_no_diff():
+    orch = _orchestrator(implementation_attempts=3)
+    orch.git = _ImplementerGit(changed_files=[], diff_value="")
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        return _agent_result(ok=False, output="agent crashed with a stack trace")
+
+    orch._agent_run = agent_run
+
+    with pytest.raises(PipelineBlocked) as exc:
+        orch._run_implementer(1, "context", SimpleNamespace())
+
+    assert calls == [1, 2, 3]  # bounded: full retry budget consumed
+    assert exc.value.category == FailureCategory.AGENT_PROTOCOL
+    assert "did not produce a valid repository change" in str(exc.value)
+
+
+def test_implementer_preserves_existing_diff_instead_of_reporting_none():
+    # Nonzero exit with no capacity signal, but a diff already exists in the
+    # worktree (e.g. from partial work before the failing attempt). This is
+    # a non-capacity case: classification stays AGENT_PROTOCOL, but the
+    # failure must not falsely claim no implementation exists.
+    orch = _orchestrator(implementation_attempts=2)
+    orch.git = _ImplementerGit(changed_files=[], diff_value="diff --git a/x b/x\n+work in progress")
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        return _agent_result(ok=False, output="agent exited with a tool error")
+
+    orch._agent_run = agent_run
+
+    with pytest.raises(PipelineBlocked) as exc:
+        orch._run_implementer(1, "context", SimpleNamespace())
+
+    assert calls == [1, 2]  # non-capacity retries are unchanged
+    assert exc.value.category == FailureCategory.AGENT_PROTOCOL
+    assert "did not produce a valid repository change" not in str(exc.value)
+    assert "preserved" in str(exc.value)
+
+
+def test_implementer_stops_immediately_when_capacity_is_exhausted():
+    orch = _orchestrator(implementation_attempts=3)
+    orch.git = _ImplementerGit(changed_files=[], diff_value="")
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        return _agent_result(ok=False, output="Error: usage limit reached. Try again later.")
+
+    orch._agent_run = agent_run
+
+    with pytest.raises(PipelineBlocked) as exc:
+        orch._run_implementer(1, "context", SimpleNamespace())
+
+    assert calls == [1]  # stops immediately, does not consume the full budget
+    assert exc.value.category == FailureCategory.PROVIDER_CAPACITY
+
+
+def test_implementer_capacity_exhaustion_preserves_existing_diff():
+    orch = _orchestrator(implementation_attempts=3)
+    orch.git = _ImplementerGit(changed_files=[], diff_value="diff --git a/x b/x\n+partial")
+    calls = []
+
+    def agent_run(task_db_id, role, prompt, worktree, attempt):
+        calls.append(attempt)
+        return _agent_result(ok=False, output="session limit exceeded for this account")
+
+    orch._agent_run = agent_run
+
+    with pytest.raises(PipelineBlocked) as exc:
+        orch._run_implementer(1, "context", SimpleNamespace())
+
+    assert calls == [1]  # stops immediately even though a diff exists
+    assert exc.value.category == FailureCategory.PROVIDER_CAPACITY
+    assert "preserved" in str(exc.value)

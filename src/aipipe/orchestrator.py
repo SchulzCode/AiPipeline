@@ -26,7 +26,7 @@ from .merge_policy import MergeEvidence, merge_allowed
 from .models import ContextClass, FailureCategory, Risk, Route, TaskContract, TaskStatus, TaskType
 from .prompts import DISCOVERY_SUFFIX, IMPLEMENTER_SUFFIX, PLANNER_SUFFIX, REVIEWER_SUFFIX, SECURITY_SUFFIX
 from .quality import QualityEngine
-from .reliability import ReviewVerdict, looks_transient, parse_review_verdict
+from .reliability import ReviewVerdict, looks_like_capacity_exhaustion, looks_transient, parse_review_verdict
 from .router import acceptance_from_text, planner_required, route_task
 from .security import SecurityEngine, scan_added_diff
 from .setup_engine import SetupEngine
@@ -722,6 +722,69 @@ class Orchestrator:
 
         return review_ok, security_review_ok
 
+    def _run_implementer(
+        self,
+        task_db_id: int,
+        implement_context: str,
+        worktree: Path,
+    ) -> None:
+        """Run the bounded implementer retry loop.
+
+        Returns normally once an attempt exits cleanly with a repository
+        diff. On failure, a provider/session/quota capacity signal stops
+        the retry loop immediately rather than consuming the remaining
+        attempt budget, since an immediate retry will not resolve exhausted
+        capacity. Any diff already present in the worktree (from this or an
+        earlier attempt) is reported rather than masked, so a failure is
+        never misreported as "no implementation exists" when partial work
+        is actually recoverable.
+        """
+        last_output = ""
+        capacity_exhausted = False
+        for attempt in range(1, self.config.implementation_attempts + 1):
+            result = self._agent_run(
+                task_db_id,
+                "IMPLEMENTER",
+                implement_context,
+                worktree,
+                attempt,
+            )
+            last_output = result.output
+            self.state.event(
+                task_db_id,
+                "IMPLEMENTER_RUN",
+                f"attempt={attempt} rc={result.returncode}\n{truncate(result.output, 5000)}",
+            )
+            if result.ok and self.git.changed_files(worktree):
+                return
+            if not result.ok and looks_like_capacity_exhaustion(result.output):
+                capacity_exhausted = True
+                break
+
+        has_existing_diff = bool(self.git.diff(worktree))
+        if capacity_exhausted:
+            message = "Implementation stopped because provider/session capacity appears exhausted."
+            message += (
+                " An existing repository diff was preserved for resumption."
+                if has_existing_diff
+                else " No repository changes had been produced yet."
+            )
+            raise PipelineBlocked(
+                message + " " + truncate(last_output, 2000),
+                FailureCategory.PROVIDER_CAPACITY,
+            )
+        if has_existing_diff:
+            raise PipelineBlocked(
+                "Implementation did not complete cleanly, but an existing repository diff "
+                "was preserved rather than discarded. " + truncate(last_output, 2000),
+                FailureCategory.AGENT_PROTOCOL,
+            )
+        raise PipelineBlocked(
+            "Implementation did not produce a valid repository change. "
+            + truncate(last_output, 2000),
+            FailureCategory.AGENT_PROTOCOL,
+        )
+
     def _run_planner(
         self,
         task_db_id: int,
@@ -1074,31 +1137,7 @@ class Orchestrator:
                 + "\n\n"
                 + IMPLEMENTER_SUFFIX
             )
-            implemented = False
-            last_output = ""
-            for attempt in range(1, self.config.implementation_attempts + 1):
-                result = self._agent_run(
-                    task_db_id,
-                    "IMPLEMENTER",
-                    implement_context,
-                    worktree,
-                    attempt,
-                )
-                last_output = result.output
-                self.state.event(
-                    task_db_id,
-                    "IMPLEMENTER_RUN",
-                    f"attempt={attempt} rc={result.returncode}\n{truncate(result.output, 5000)}",
-                )
-                if result.ok and self.git.changed_files(worktree):
-                    implemented = True
-                    break
-            if not implemented:
-                raise PipelineBlocked(
-                    "Implementation did not produce a valid repository change. "
-                    + truncate(last_output, 2000),
-                    FailureCategory.AGENT_PROTOCOL,
-                )
+            self._run_implementer(task_db_id, implement_context, worktree)
 
             quality = QualityEngine(
                 self.config.quality_commands,
