@@ -38,6 +38,7 @@ class PipelineConfig:
     discovery_attempts: int = 2
     codex: dict[str, Any] = field(default_factory=dict)
     claude: dict[str, Any] = field(default_factory=dict)
+    qwen: dict[str, Any] = field(default_factory=dict)
 
 
 def home_dir() -> Path:
@@ -110,6 +111,7 @@ def config_from_merged(merged: dict[str, Any]) -> PipelineConfig:
         discovery_attempts=int(discovery.get("attempts", 2)),
         codex=dict(merged.get("codex", {})),
         claude=dict(merged.get("claude", {})),
+        qwen=dict(merged.get("qwen", {})),
     )
 
 
