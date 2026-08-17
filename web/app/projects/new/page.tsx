@@ -175,6 +175,7 @@ export default function NewProject() {
           <select value={agent} onChange={(e) => handleAgentChange(e.target.value)} className={FIELD}>
             <option value="codex">Codex</option>
             <option value="claude">Claude Code</option>
+            <option value="qwen">Local Qwen</option>
           </select>
         </label>
 
@@ -188,6 +189,12 @@ export default function NewProject() {
             ))}
           </select>
         </label>
+
+        {agent === "qwen" ? (
+          <p className="rounded-md border border-border bg-surface-sunken px-3 py-2 text-xs text-fg-muted">
+            Local Qwen requires a compatible OpenAI-style model server to be running separately and reachable by the AIpipe worker.
+          </p>
+        ) : null}
 
         {error ? <ErrorBanner message={error} /> : null}
 

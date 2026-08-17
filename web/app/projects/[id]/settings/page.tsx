@@ -146,6 +146,7 @@ export default function ProjectSettingsPage() {
             >
               <option value="codex">Codex</option>
               <option value="claude">Claude Code</option>
+              <option value="qwen">Local Qwen</option>
             </select>
           </Field>
           <Field label="Model">
@@ -157,6 +158,11 @@ export default function ProjectSettingsPage() {
               ))}
             </select>
           </Field>
+          {identity.agent === "qwen" ? (
+            <p className="sm:col-span-2 rounded-md border border-border bg-surface-sunken px-3 py-2 text-xs text-fg-muted">
+              Local Qwen requires a compatible OpenAI-style model server to be running separately and reachable by the AIpipe worker.
+            </p>
+          ) : null}
         </CardBody>
       </Card>
 
