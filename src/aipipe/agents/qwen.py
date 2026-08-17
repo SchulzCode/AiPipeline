@@ -24,6 +24,7 @@ _LOCAL_ENV_MAP = {
     "AIPIPE_LOCAL_LLM_API_KEY": "OPENAI_API_KEY",
     "AIPIPE_LOCAL_LLM_MODEL": "OPENAI_MODEL",
 }
+_LOCAL_MODEL_ALIAS = os.environ.get("AIPIPE_LOCAL_LLM_MODEL", "qwen-local").strip() or "qwen-local"
 
 
 def _local_subprocess_env(runtime_env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
@@ -89,9 +90,13 @@ def _parse_headless_output(stdout: str) -> tuple[str, int, int]:
 class QwenAdapter:
     name = "qwen"
 
-    # Local/provider model ids are deployment-specific. Registration and
-    # project-facing model configuration are added separately from this adapter.
-    MODELS = [ModelOption(id=None, label="Default (automatic)")]
+    # The model alias is deployment-specific and comes from the same setting the
+    # worker uses to reach the local server. A stable fallback keeps local dev and
+    # the model-listing API useful before a custom alias is configured.
+    MODELS = [
+        ModelOption(id=None, label="Default (automatic)"),
+        ModelOption(id=_LOCAL_MODEL_ALIAS, label=f"Local Qwen ({_LOCAL_MODEL_ALIAS})"),
+    ]
 
     def __init__(self, config: dict, timeout: int = 3600, runtime_env: dict[str, str] | None = None):
         self.config = config
