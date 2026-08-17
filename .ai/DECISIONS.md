@@ -428,3 +428,61 @@ is introduced; everything stays a deterministic regex/dataclass parse, and
 malformed metadata (missing `Status:`, garbled `Tags:`, no ID) degrades to
 `status="active"`/`tags=[]` rather than raising, so a broken entry can never
 break normal task execution.
+
+## D-011 Bounded, structured Planner -> Implementer task-map handoff, degrading safely to no map
+Tags: backend, context, planning, orchestrator
+Status: active
+Severity: low
+
+Decision:
+`PLANNER_SUFFIX` now asks the Planner, after its existing free-form plan
+sections, to append exactly one fenced JSON object with up to six bounded
+list fields: `relevant_files`, `relevant_symbols`, `likely_tests`,
+`constraints`, `risks`, `out_of_scope` -- short single-line pointers only,
+explicitly never code excerpts or full files. New `task_map.py` parses this
+out of the raw plan text with `json.JSONDecoder.raw_decode` (the same
+tolerant-extraction technique `reliability._embedded_review_payloads` uses
+for reviewer JSON), requiring at least one recognized field key before
+treating a JSON object as a task map so an unrelated example snippet
+elsewhere in the plan is never mistaken for one. Every field is hard-capped
+at parse time (10 items, 160 chars per item, whitespace collapsed, prefix-
+cut rather than `truncate()`'s head+tail marker so a large multi-line
+excerpt cannot smuggle its tail through as one "item"); `parse_task_map`
+returns `None` whenever no JSON is found, it's malformed, no recognized key
+is present, or every field ends up empty after coercion -- the only failure
+path, so a Planner that ignores the new instruction (or emits a broken
+block) safely degrades to today's no-task-map Implementer prompt rather
+than blocking the task. `ContextBuilder.build()` takes an optional
+`task_map` kwarg and renders it as a protected `# Task Map` section
+(directly after `# Implementation Plan`) via `render_task_map`, itself
+wrapped in a final `truncate()` call as defense-in-depth; the section's
+text explicitly states the task map is Planner-derived guidance to verify
+first, not a contract, and that the task goal/acceptance criteria/out-of-
+scope above always take precedence. `orchestrator.py` gained one new seam,
+`Orchestrator._build_implement_context`, which parses `plan_text` (already
+produced by the existing `_run_planner`, itself unchanged) into a task map
+and threads it into the *initial* Implementer's `context.build(...)` call
+only -- no new agent/LLM invocation, no change to the Planner's read-only
+sandboxing or diff-hash tripwire, and no task map delivered to remediation/
+gate-repair/CI-fix Implementer prompts or to REVIEWER/SECURITY_REVIEWER.
+
+Reason:
+DEEP tasks already pay for a read-only Planner pass that explores the
+repository, but its findings previously reached the Implementer only as
+unstructured prose buried in the free-form plan, forcing the Implementer to
+re-derive "which files/symbols/tests actually matter" from scratch via its
+own broad exploration. A small structured, capped-size addendum lets the
+Implementer jump straight to verifying the files/symbols the Planner already
+found, while every design choice here exists to guarantee it can never
+become a new failure mode: hard per-field/per-item caps plus a final
+`truncate()` keep it bounded under the existing #46 context-budget
+architecture without needing new budget-table entries (it is `protected`,
+like `Implementation Plan`, since its own caps already bound it far below
+any role/`ContextClass` budget); requiring a recognized key mirrors the
+existing reviewer-JSON extraction precedent instead of inventing new parsing
+risk; returning `None` on any parse failure (rather than raising) is the
+same "degrade safely, never block a valid task" idiom `RepoIndexCache` (#45)
+and `knowledge.py` (#48) already use; and the rendered section's own text
+reiterates the #47 precedence order (task contract over Planner guidance)
+so the map cannot be read as elevating Planner output above the task's own
+goal and acceptance criteria.

@@ -7,6 +7,7 @@ from .context_budget import budget_for
 from .knowledge import select_relevant_entries
 from .models import TaskContract
 from .repo_index import RepoIndexCache, render_repo_index
+from .task_map import TaskMap, render_task_map
 from .util import truncate
 
 TRUNCATION_NOTICE = (
@@ -113,6 +114,7 @@ class ContextBuilder:
         diff: str = "",
         findings: str = "",
         plan: str = "",
+        task_map: TaskMap | None = None,
         *,
         budget_role: str | None = None,
     ) -> str:
@@ -135,6 +137,8 @@ class ContextBuilder:
             )
         if plan:
             sections.append(_Section("# Implementation Plan\n" + truncate(plan, 10000), protected=True))
+        if task_map is not None and not task_map.is_empty():
+            sections.append(_Section(render_task_map(task_map), protected=True))
         for filename in self._policy_files_for(role, task.route):
             content = self._read(self.global_root / filename, _POLICY_LIMITS[filename])
             if content:

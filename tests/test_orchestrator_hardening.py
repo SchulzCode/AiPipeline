@@ -8,7 +8,11 @@ from aipipe.reliability import ReviewVerdict
 
 
 class _Context:
+    def __init__(self):
+        self.build_calls = []
+
     def build(self, *args, **kwargs):
+        self.build_calls.append((args, kwargs))
         return "context"
 
 
@@ -317,6 +321,48 @@ def test_planner_mutating_the_worktree_is_blocked_as_state_inconsistency():
 
     assert exc.value.category == FailureCategory.STATE_INCONSISTENCY
     assert "read-only" in str(exc.value)
+
+
+# -- Planner -> Implementer task-map handoff (#49) --------------------------
+
+
+def test_build_implement_context_passes_parsed_task_map_to_context_build():
+    orch = _orchestrator()
+    plan_text = (
+        "Goal\nDo the thing.\n\n"
+        '```json\n{"relevant_files": ["a.py"], "constraints": ["stay read-only"]}\n```\n'
+    )
+
+    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), plan_text)
+
+    (args, kwargs) = orch.context.build_calls[-1]
+    assert args[2] == "IMPLEMENTER"
+    assert kwargs["plan"] == plan_text
+    task_map = kwargs["task_map"]
+    assert task_map is not None
+    assert task_map.relevant_files == ("a.py",)
+    assert task_map.constraints == ("stay read-only",)
+
+
+def test_build_implement_context_degrades_to_no_task_map_when_plan_has_no_json():
+    orch = _orchestrator()
+    plan_text = "Goal\nDo the thing.\nNo JSON task map included.\n"
+
+    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), plan_text)
+
+    (args, kwargs) = orch.context.build_calls[-1]
+    assert kwargs["plan"] == plan_text
+    assert kwargs["task_map"] is None
+
+
+def test_build_implement_context_degrades_to_no_task_map_when_plan_is_empty():
+    orch = _orchestrator()
+
+    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), "")
+
+    (args, kwargs) = orch.context.build_calls[-1]
+    assert kwargs["plan"] == ""
+    assert kwargs["task_map"] is None
 
 
 def test_implementer_succeeds_on_first_clean_attempt():

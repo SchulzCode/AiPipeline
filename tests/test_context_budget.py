@@ -13,6 +13,7 @@ from aipipe.context_budget import (
     estimate_tokens,
 )
 from aipipe.models import ContextClass, Risk, Route, TaskContract, TaskType
+from aipipe.task_map import TaskMap
 
 
 def _task(context_class: ContextClass, **kwargs) -> TaskContract:
@@ -259,6 +260,52 @@ def test_safe_behavior_when_context_is_extremely_large(tmp_path: Path):
     assert "# Task" in text
     assert "a" * 500 in text
     assert TRUNCATION_NOTICE in text
+
+
+def test_maximal_task_map_stays_bounded_and_does_not_crowd_out_other_protected_sections(tmp_path: Path):
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    (global_root / "AGENT.md").write_text("agent rules body", encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".ai").mkdir(parents=True)
+    (repo / ".ai" / "PROJECT.md").write_text("p" * 20_000, encoding="utf-8")
+    (repo / ".ai" / "DECISIONS.md").write_text(
+        "## D-1\nTags: general\nStatus: active\n" + ("d" * 20_000) + "\n",
+        encoding="utf-8",
+    )
+
+    task = _task(
+        ContextClass.SMALL,
+        acceptance_criteria=["must not break auth"],
+        out_of_scope=["billing"],
+    )
+    builder = ContextBuilder(global_root)
+    oversized_task_map = TaskMap(
+        relevant_files=tuple(f"src/module_{i}.py" * 5 for i in range(100)),
+        relevant_symbols=tuple(f"Symbol{i}" * 5 for i in range(100)),
+        likely_tests=tuple(f"tests/test_{i}.py" * 5 for i in range(100)),
+        constraints=tuple(f"constraint {i}" * 5 for i in range(100)),
+        risks=tuple(f"risk {i}" * 5 for i in range(100)),
+        out_of_scope=tuple(f"out of scope {i}" * 5 for i in range(100)),
+    )
+
+    text = builder.build(
+        repo,
+        task,
+        "IMPLEMENTER",
+        plan="Goal\nDo the thing.\n",
+        task_map=oversized_task_map,
+        diff="d" * 100_000,
+        findings="f" * 100_000,
+    )
+
+    budget = budget_for("IMPLEMENTER", ContextClass.SMALL)
+    assert len(text) <= budget.total_chars + 3000
+    assert "do the thing" in text
+    assert "must not break auth" in text
+    assert "billing" in text
+    assert "agent rules body" in text
+    assert "# Task Map" in text
 
 
 def test_backward_compatible_with_existing_small_normal_tasks(tmp_path: Path):
