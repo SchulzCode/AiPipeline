@@ -8,6 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from ..agents import agent_models
 
 
+AgentName = Literal["codex", "claude", "qwen"]
+
+
 class ORMModel(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
@@ -25,7 +28,7 @@ class ProjectCreate(BaseModel):
     local_path: str | None = None
     installation_id: int | None = None
     default_branch: str = "main"
-    agent: Literal["codex", "claude"] = "codex"
+    agent: AgentName = "codex"
     model: str | None = None
 
     @model_validator(mode="after")
@@ -48,7 +51,7 @@ class ProjectCreate(BaseModel):
 
 class ProjectUpdate(BaseModel):
     name: str | None = Field(default=None, min_length=1, max_length=255)
-    agent: Literal["codex", "claude"] | None = None
+    agent: AgentName | None = None
     model: str | None = None
     enabled: bool | None = None
 
@@ -284,7 +287,7 @@ class ProjectConfigOut(BaseModel):
 
 class ProjectConfigPatch(BaseModel):
     main_branch: str | None = Field(default=None, min_length=1, max_length=255)
-    agent: Literal["codex", "claude"] | None = None
+    agent: AgentName | None = None
     auto_merge: bool | None = None
     merge_method: Literal["squash", "merge", "rebase"] | None = None
     ci_timeout_seconds: int | None = Field(default=None, ge=60, le=21600)
