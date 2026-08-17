@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,30 @@ rebase, create pull requests, change branches, or modify remotes. Work only insi
 the supplied workspace. Implementation and repair roles may edit source files and
 run relevant local verification. Read-only roles must not modify the workspace.
 """
+
+# AIpipe deliberately does not set provider-generic OPENAI_* endpoint variables
+# in the worker environment. They are translated only for the Qwen subprocess so
+# the existing Codex adapter can continue using its normal provider endpoint.
+_LOCAL_ENV_MAP = {
+    "AIPIPE_LOCAL_LLM_BASE_URL": "OPENAI_BASE_URL",
+    "AIPIPE_LOCAL_LLM_API_KEY": "OPENAI_API_KEY",
+    "AIPIPE_LOCAL_LLM_MODEL": "OPENAI_MODEL",
+}
+
+
+def _local_subprocess_env(runtime_env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
+    source = dict(os.environ)
+    source.update(runtime_env)
+    mapped = {
+        provider_key: value
+        for aipipe_key, provider_key in _LOCAL_ENV_MAP.items()
+        if (value := source.get(aipipe_key))
+    }
+    # Do not expose the AIpipe-specific source variables to the child process;
+    # only the translated provider variables are needed by Qwen Code.
+    passthrough = {key: value for key, value in runtime_env.items() if key not in _LOCAL_ENV_MAP}
+    passthrough.update(mapped)
+    return safe_process_env(passthrough), mapped
 
 
 def _usage_tokens(usage: Any) -> tuple[int, int]:
@@ -89,10 +114,11 @@ class QwenAdapter:
             _AIPIPE_SYSTEM_PROMPT,
         ]
 
-        auth_type = self.config.get("auth_type")
+        process_env, local_env = _local_subprocess_env(self.runtime_env)
+        auth_type = self.config.get("auth_type") or ("openai" if local_env.get("OPENAI_BASE_URL") else None)
         if auth_type:
             cmd += ["--auth-type", str(auth_type)]
-        model = self.config.get("model")
+        model = self.config.get("model") or local_env.get("OPENAI_MODEL")
         if model:
             cmd += ["--model", str(model)]
 
@@ -100,7 +126,7 @@ class QwenAdapter:
             cmd,
             workspace,
             self.timeout,
-            env=safe_process_env(self.runtime_env),
+            env=process_env,
             inherit_env=False,
         )
         final, input_tokens, output_tokens = _parse_headless_output(result.stdout)
