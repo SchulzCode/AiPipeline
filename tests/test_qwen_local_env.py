@@ -25,7 +25,7 @@ def test_qwen_translates_aipipe_local_endpoint_only_in_child_env(monkeypatch, tm
         return CommandResult(cmd, 0, _QWEN_OK, "")
 
     monkeypatch.setattr("aipipe.agents.qwen.run", fake_run)
-    QwenAdapter({}).run("IMPLEMENTER", "do it", tmp_path)
+    QwenAdapter({"readiness_check": False}).run("IMPLEMENTER", "do it", tmp_path)
 
     env = captured["env"]
     cmd = captured["cmd"]
@@ -49,7 +49,7 @@ def test_qwen_runtime_env_can_override_process_local_settings(monkeypatch, tmp_p
 
     monkeypatch.setattr("aipipe.agents.qwen.run", fake_run)
     QwenAdapter(
-        {},
+        {"readiness_check": False},
         runtime_env={
             "AIPIPE_LOCAL_LLM_BASE_URL": "http://runtime:9000/v1",
             "AIPIPE_LOCAL_LLM_API_KEY": "runtime-key",
@@ -73,7 +73,7 @@ def test_explicit_qwen_model_still_wins_over_local_model_alias(monkeypatch, tmp_
         return CommandResult(cmd, 0, _QWEN_OK, "")
 
     monkeypatch.setattr("aipipe.agents.qwen.run", fake_run)
-    QwenAdapter({"model": "project-model"}).run("IMPLEMENTER", "do it", tmp_path)
+    QwenAdapter({"model": "project-model", "readiness_check": False}).run("IMPLEMENTER", "do it", tmp_path)
 
     cmd = captured["cmd"]
     assert cmd[cmd.index("--model") + 1] == "project-model"

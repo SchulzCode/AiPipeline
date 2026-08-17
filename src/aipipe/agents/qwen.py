@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import AgentResult, ModelOption, READ_ONLY_ROLES, finalize_result
+from .qwen_readiness import QwenReadinessError, probe_local_model_endpoint
 from ..util import require_binary, run, safe_process_env
 
 
@@ -25,6 +26,16 @@ _LOCAL_ENV_MAP = {
     "AIPIPE_LOCAL_LLM_MODEL": "OPENAI_MODEL",
 }
 _LOCAL_MODEL_ALIAS = os.environ.get("AIPIPE_LOCAL_LLM_MODEL", "qwen-local").strip() or "qwen-local"
+
+
+def _local_settings(runtime_env: dict[str, str]) -> dict[str, str]:
+    source = dict(os.environ)
+    source.update(runtime_env)
+    return {
+        key: value
+        for key in _LOCAL_ENV_MAP
+        if (value := source.get(key))
+    }
 
 
 def _local_subprocess_env(runtime_env: dict[str, str]) -> tuple[dict[str, str], dict[str, str]]:
@@ -102,7 +113,21 @@ class QwenAdapter:
         self.config = config
         self.timeout = timeout
         self.runtime_env = runtime_env or {}
-        require_binary(config.get("binary", "qwen"))
+        binary = config.get("binary", "qwen")
+        require_binary(binary)
+
+        local = _local_settings(self.runtime_env)
+        base_url = local.get("AIPIPE_LOCAL_LLM_BASE_URL", "")
+        if base_url and config.get("readiness_check", True):
+            model = str(config.get("model") or local.get("AIPIPE_LOCAL_LLM_MODEL", ""))
+            readiness = probe_local_model_endpoint(
+                base_url,
+                api_key=local.get("AIPIPE_LOCAL_LLM_API_KEY", ""),
+                model=model,
+                timeout_seconds=float(config.get("readiness_timeout_seconds", 3.0)),
+            )
+            if not readiness.ok:
+                raise QwenReadinessError(readiness.detail)
 
     def run(self, role: str, prompt: str, workspace: Path) -> AgentResult:
         binary = self.config.get("binary", "qwen")
