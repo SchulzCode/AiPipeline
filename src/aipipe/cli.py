@@ -9,6 +9,7 @@ from pathlib import Path
 from .agents.qwen_readiness import probe_local_model_endpoint
 from .bootstrap import initialize_global, initialize_project
 from .config import home_dir, load_config
+from .local_canary import run_local_qwen_canary
 from .orchestrator import Orchestrator, PipelineBlocked
 from .reliability import build_identity
 from .state import StateStore
@@ -32,6 +33,10 @@ def build_parser() -> argparse.ArgumentParser:
     s.add_argument("task_id", nargs="?")
     sub.add_parser("init", help="Initialize global and project AIpipe knowledge/config")
     sub.add_parser("doctor", help="Check execution, repository and integration prerequisites")
+    sub.add_parser(
+        "local-canary",
+        help="Run an opt-in end-to-end canary against the configured local Qwen model server",
+    )
     return p
 
 
@@ -138,6 +143,14 @@ def main(argv: list[str] | None = None) -> int:
         report, ok = _doctor(repo, args.agent)
         print(json.dumps(report, indent=2))
         return 0 if ok else 1
+    if args.command == "local-canary":
+        try:
+            result = run_local_qwen_canary()
+            print(json.dumps(result.to_dict(), indent=2))
+            return 0 if result.ok else 1
+        except Exception as exc:
+            print(json.dumps({"ok": False, "detail": str(exc)}, indent=2))
+            return 1
     if args.command == "status":
         store = StateStore(home_dir() / "state" / "pipeline.db")
         if args.task_id:
