@@ -53,6 +53,7 @@ services:
       args:
         CODEX_VERSION: ${CODEX_VERSION:-0.147.0}
         CLAUDE_CODE_VERSION: ${CLAUDE_CODE_VERSION:-2.1.232}
+        QWEN_CODE_VERSION: ${QWEN_CODE_VERSION:-0.21.2}
     environment:
       DATABASE_URL: postgresql+psycopg://aipipe:${POSTGRES_PASSWORD:-change-me}@postgres:5432/aipipe
       AIPIPE_REPOS_ROOT: /data/repos
@@ -63,7 +64,12 @@ services:
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       CLAUDE_CODE_OAUTH_TOKEN: ${CLAUDE_CODE_OAUTH_TOKEN:-}
+      AIPIPE_LOCAL_LLM_BASE_URL: ${AIPIPE_LOCAL_LLM_BASE_URL:-http://host.docker.internal:8080/v1}
+      AIPIPE_LOCAL_LLM_API_KEY: ${AIPIPE_LOCAL_LLM_API_KEY:-}
+      AIPIPE_LOCAL_LLM_MODEL: ${AIPIPE_LOCAL_LLM_MODEL:-qwen-local}
       HOME: /tmp/aipipe-home
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       postgres:
         condition: service_healthy
