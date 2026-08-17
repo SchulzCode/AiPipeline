@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-import re
 from dataclasses import dataclass
 from pathlib import Path
 
 from .context_budget import budget_for
+from .knowledge import select_relevant_entries
 from .models import TaskContract
 from .repo_index import RepoIndexCache, render_repo_index
 from .util import truncate
@@ -103,16 +103,7 @@ class ContextBuilder:
         if not path.exists():
             return ""
         text = path.read_text(encoding="utf-8", errors="replace")
-        chunks = re.split(r"(?=^##\s+)", text, flags=re.MULTILINE)
-        needles = [s.lower() for s in scopes]
-        active = []
-        for c in chunks:
-            lc = c.lower()
-            if "status: obsolete" in lc or "status: superseded" in lc:
-                continue
-            if any(n in lc for n in needles):
-                active.append(c.strip())
-        return truncate("\n\n".join(active), limit)
+        return select_relevant_entries(text, scopes, limit=limit)
 
     def build(
         self,

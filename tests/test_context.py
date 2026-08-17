@@ -284,3 +284,54 @@ def test_agent_md_template_no_longer_duplicates_the_precedence_notice():
 
     agent_md = (files("aipipe.templates") / "global" / "AGENT.md").read_text(encoding="utf-8")
     assert "untrusted" not in agent_md.lower()
+
+
+# -- Structured, bounded, relevant knowledge retrieval (#48) ----------------
+
+
+def test_decisions_and_learnings_never_precede_policy_precedence_or_task_contract(tmp_path: Path):
+    global_root = _populated_global_root(tmp_path)
+    repo = tmp_path / "repo"
+    (repo / ".ai").mkdir(parents=True)
+    (repo / ".ai" / "DECISIONS.md").write_text(
+        "## D-1 Auth\nTags: auth\nStatus: active\nKeep auth server-side.\n",
+        encoding="utf-8",
+    )
+    (repo / ".ai" / "LEARNINGS.md").write_text(
+        "## L-1 Auth learning\nTags: auth\nStatus: active\nDo not log tokens.\n",
+        encoding="utf-8",
+    )
+    route = Route(TaskType.FEATURE, Risk.HIGH, ContextClass.NORMAL, ["auth"], [])
+    task = TaskContract("T-1", "auth thing", acceptance_criteria=["works"], route=route)
+    builder = ContextBuilder(global_root)
+
+    text = builder.build(repo, task, "IMPLEMENTER")
+
+    assert "# Relevant Decisions" in text
+    assert "# Relevant Learnings" in text
+    assert text.index(POLICY_PRECEDENCE_NOTICE) < text.index("# Relevant Decisions")
+    assert text.index("# Task") < text.index("# Relevant Decisions")
+    assert text.index(POLICY_PRECEDENCE_NOTICE) < text.index("# Relevant Learnings")
+    assert text.index("# Global Agent Rules") < text.index("# Relevant Decisions")
+    assert text.index("# Security Rules") < text.index("# Relevant Learnings")
+
+
+def test_normal_task_with_legacy_flat_learnings_file_still_retrieves_matching_content(tmp_path: Path):
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    (global_root / "AGENT.md").write_text("minimal", encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".ai").mkdir(parents=True)
+    (repo / ".ai" / "LEARNINGS.md").write_text(
+        "# Project Learnings\n\n"
+        "- Auth tokens must be stored server-side, never in local storage.\n"
+        "- The billing reconciliation job runs nightly via a cron trigger.\n",
+        encoding="utf-8",
+    )
+    route = Route(TaskType.FEATURE, Risk.LOW, ContextClass.NORMAL, ["auth"], [])
+    task = TaskContract("T-2", "auth thing", acceptance_criteria=["works"], route=route)
+
+    text = ContextBuilder(global_root).build(repo, task, "IMPLEMENTER")
+
+    assert "Auth tokens must be stored server-side" in text
+    assert "billing reconciliation job" not in text

@@ -381,3 +381,50 @@ untouched — see the originating issue for what remains explicitly
 out of scope (project knowledge retrieval, Planner task-map handoff,
 Planner constraint persistence, compact remediation packets, context
 telemetry).
+
+## D-010 Structured tag/scope retrieval for `.ai/DECISIONS.md`/`.ai/LEARNINGS.md`, bounded, backward compatible
+Tags: backend, context, knowledge
+Status: active
+Severity: low
+
+Decision:
+`ContextBuilder._relevant_entries` now delegates to new
+`aipipe.knowledge.parse_knowledge_entries`/`select_relevant_entries`, rather
+than doing a single lowercase substring check per `##`-split chunk. Parsing
+strips `<!-- ... -->` HTML comments first (so template example blocks never
+surface as real entries), then splits on `## ID Title` headers when present,
+reading `Tags:`/`Status:` metadata per entry (`structured=True`); a file
+with no `##` headers at all (a legacy flat bullet list) instead splits on
+top-level `- ` bullets, one unstructured entry per bullet. Selection excludes
+`status in {obsolete, superseded}` first, then matches: structured entries
+by tag-set intersection with the task's route scopes only (no body substring
+check once metadata exists); unstructured entries by the pre-existing
+lowercase-substring-against-scopes fallback. If nothing matches and
+`"general"` is one of the scopes, a bounded set (3) of the first active
+entries is returned instead of nothing. Results are deduped by entry ID and
+by exact normalized text, then capped at 8 entries before the existing
+per-call `truncate()` character limit is applied. `context.py`'s section
+ordering, `protected`/`drop_priority` wiring, and budget enforcement (#46)
+are untouched — this only changes what text `_relevant_entries` returns.
+This repo's own `.ai/LEARNINGS.md` was reformatted from a flat bullet list
+into the structured convention (content preserved verbatim, one `## L-NNN`
+entry per prior bullet with tags matching its subject) to dogfood the
+convention this decision introduces.
+
+Reason:
+The prior "one substring check across the whole chunk" approach could not
+distinguish structured metadata from body prose, so a chunk could match a
+scope needle by accident anywhere in its free text, could not bound how many
+entries came back from a large file, and returned an entire flat legacy file
+as one undivided blob if any needle matched anywhere in it. Preferring
+structured tags when present is more precise and satisfies the issue's
+explicit requirement to not rely on broad body substring matching once
+metadata exists, while keeping the substring fallback for legacy flat files
+is what "preserve backward compatibility with existing flat/legacy knowledge
+files" requires — those files still work, just more precisely bounded than
+before. Deduping by ID/text avoids feeding an agent the same duplicated or
+contradictory decision twice. No LLM call, embeddings, or vector database
+is introduced; everything stays a deterministic regex/dataclass parse, and
+malformed metadata (missing `Status:`, garbled `Tags:`, no ID) degrades to
+`status="active"`/`tags=[]` rather than raising, so a broken entry can never
+break normal task execution.
