@@ -84,7 +84,7 @@ def test_control_api_agent_models(monkeypatch, tmp_path):
         response = client.get("/agents/models")
         assert response.status_code == 200
         body = response.json()
-        assert set(body.keys()) == {"codex", "claude"}
+        assert set(body.keys()) == {"codex", "claude", "qwen"}
         for models in body.values():
             ids = {m["id"] for m in models}
             assert None in ids  # Default/Automatic present for every agent
