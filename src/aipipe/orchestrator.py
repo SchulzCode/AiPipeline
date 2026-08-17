@@ -32,6 +32,7 @@ from .router import acceptance_from_text, planner_required, route_task
 from .security import SecurityEngine, scan_added_diff
 from .setup_engine import SetupEngine
 from .state import StateStore
+from .task_map import parse_task_map
 from .util import truncate
 
 
@@ -827,6 +828,26 @@ class Orchestrator:
             FailureCategory.PLANNING_FAILURE,
         )
 
+    def _build_implement_context(
+        self,
+        worktree: Path,
+        contract: TaskContract,
+        plan_text: str,
+    ) -> str:
+        """Build the initial Implementer prompt, including the Planner's task map when usable.
+
+        Parsing is pure/local (no extra agent call): a missing or malformed
+        task map in `plan_text` simply yields `task_map=None`, which
+        degrades to the current no-task-map Implementer prompt rather than
+        blocking the task.
+        """
+        task_map = parse_task_map(plan_text) if plan_text else None
+        return (
+            self.context.build(worktree, contract, "IMPLEMENTER", plan=plan_text, task_map=task_map)
+            + "\n\n"
+            + IMPLEMENTER_SUFFIX
+        )
+
     def _run_discovery_agent(
         self,
         task_db_id: int,
@@ -1136,11 +1157,7 @@ class Orchestrator:
                 plan_text = self._run_planner(task_db_id, contract, worktree)
             self.state.set_status(public_id, TaskStatus.IMPLEMENTING)
 
-            implement_context = (
-                self.context.build(worktree, contract, "IMPLEMENTER", plan=plan_text)
-                + "\n\n"
-                + IMPLEMENTER_SUFFIX
-            )
+            implement_context = self._build_implement_context(worktree, contract, plan_text)
             self._run_implementer(task_db_id, implement_context, worktree)
 
             quality = QualityEngine(

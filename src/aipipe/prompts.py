@@ -17,6 +17,8 @@ Risks / compatibility concerns
 Required tests
 Out of scope
 Be specific to this task and this repository; omit generic advice. The Implementer will receive this plan as guidance, not as a contract to follow blindly.
+
+After the plan, append exactly one fenced ```json block containing a single bounded task-map object with up to six keys: relevant_files, relevant_symbols, likely_tests, constraints, risks, out_of_scope. Each key's value is a short JSON array of strings (omit keys with nothing useful to report). Each string must be a short, single-line pointer such as a file path, a symbol/function/class name, a test file, or a one-sentence constraint/risk/out-of-scope note -- never a code excerpt, diff, or full file contents. Keep every list short (a handful of items) and every item brief; long or verbose entries will be truncated. This task map is guidance for the Implementer to verify first, not a contract -- the task's own goal, acceptance criteria, and out-of-scope notes always take precedence over it.
 """
 
 REVIEWER_SUFFIX = """

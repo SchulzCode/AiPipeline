@@ -3,6 +3,7 @@ from pathlib import Path
 from aipipe.context import POLICY_PRECEDENCE_NOTICE, ContextBuilder
 from aipipe.models import ContextClass, Risk, Route, TaskContract, TaskType
 from aipipe.repo_index import RepoIndexCache
+from aipipe.task_map import TaskMap
 from aipipe.util import run
 
 ALL_POLICY_HEADERS = {
@@ -76,6 +77,67 @@ def test_plan_is_included_when_provided_and_omitted_when_not(tmp_path: Path):
     assert "# Implementation Plan" not in without_plan
 
 
+def test_task_map_section_included_when_provided_and_omitted_when_not(tmp_path: Path):
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    route = Route(TaskType.FEATURE, Risk.LOW, ContextClass.DEEP, ["general"], [])
+    task = TaskContract("T-2", "rework the pipeline", acceptance_criteria=["works"], route=route)
+    builder = ContextBuilder(global_root)
+    task_map = TaskMap(
+        relevant_files=("src/aipipe/orchestrator.py",),
+        relevant_symbols=("Orchestrator.run",),
+        likely_tests=("tests/test_orchestrator_hardening.py",),
+    )
+
+    with_map = builder.build(
+        repo, task, "IMPLEMENTER", plan="Goal\nDo the thing.\n", task_map=task_map
+    )
+    assert "# Task Map" in with_map
+    assert "src/aipipe/orchestrator.py" in with_map
+    assert "Orchestrator.run" in with_map
+    assert "tests/test_orchestrator_hardening.py" in with_map
+    # Positioned after the task contract sections and after the plan.
+    assert with_map.index("# Acceptance Criteria") < with_map.index("# Task Map")
+    assert with_map.index("# Implementation Plan") < with_map.index("# Task Map")
+
+    without_map = builder.build(repo, task, "IMPLEMENTER", plan="Goal\nDo the thing.\n")
+    assert "# Task Map" not in without_map
+
+    without_map_arg = builder.build(repo, task, "IMPLEMENTER", plan="Goal\nDo the thing.\n", task_map=None)
+    assert without_map_arg == without_map
+
+
+def test_task_map_section_omitted_when_task_map_is_empty(tmp_path: Path):
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    route = Route(TaskType.FEATURE, Risk.LOW, ContextClass.DEEP, ["general"], [])
+    task = TaskContract("T-2", "rework the pipeline", acceptance_criteria=["works"], route=route)
+    builder = ContextBuilder(global_root)
+
+    text = builder.build(repo, task, "IMPLEMENTER", task_map=TaskMap())
+    assert "# Task Map" not in text
+
+
+def test_task_map_guidance_defers_to_task_contract_and_instructs_verify_first(tmp_path: Path):
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    route = Route(TaskType.FEATURE, Risk.LOW, ContextClass.DEEP, ["general"], [])
+    task = TaskContract("T-2", "rework the pipeline", acceptance_criteria=["works"], route=route)
+    builder = ContextBuilder(global_root)
+    task_map = TaskMap(relevant_files=("a.py",))
+
+    text = builder.build(repo, task, "IMPLEMENTER", task_map=task_map)
+    assert "not a contract" in text
+    assert "take precedence" in text
+    assert "Verify" in text
+
+
 def test_repository_index_included_when_cache_available(tmp_path: Path):
     global_root = tmp_path / "global"
     global_root.mkdir()
@@ -95,6 +157,33 @@ def test_repository_index_included_when_cache_available(tmp_path: Path):
     builder = ContextBuilder(global_root, cache)
 
     text = builder.build(repo, task, "IMPLEMENTER")
+    assert "# Repository Index" in text
+    assert "pyproject.toml" in text
+
+
+def test_repository_index_is_available_as_planner_input(tmp_path: Path):
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    git(repo, "init", "-q")
+    git(repo, "config", "user.email", "test@example.com")
+    git(repo, "config", "user.name", "Test")
+    (repo / "pyproject.toml").write_text("[project]\nname='x'\n", encoding="utf-8")
+    (repo / "app.py").write_text("def handler():\n    pass\n", encoding="utf-8")
+    git(repo, "add", "-A")
+    git(repo, "commit", "-q", "-m", "initial")
+
+    route = Route(TaskType.FEATURE, Risk.LOW, ContextClass.DEEP, ["general"], [])
+    task = TaskContract("T-3", "add a thing", acceptance_criteria=["works"], route=route)
+    cache = RepoIndexCache(tmp_path / "index-cache")
+    builder = ContextBuilder(global_root, cache)
+
+    # The Planner role's own built context (the same context it explores
+    # from and writes its plan/task map against) includes the deterministic
+    # repository index from #45, so the task map it produces can be
+    # grounded in that index rather than only its own tool exploration.
+    text = builder.build(repo, task, "PLANNER")
     assert "# Repository Index" in text
     assert "pyproject.toml" in text
 
