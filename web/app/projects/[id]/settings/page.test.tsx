@@ -70,6 +70,7 @@ const CONFIG: ProjectConfig = {
 const AGENT_MODELS: AgentModels = {
   codex: [{ id: null, label: "Default (automatic)" }, { id: "gpt-5-codex", label: "GPT-5 Codex" }],
   claude: [{ id: null, label: "Default (automatic)" }, { id: "sonnet", label: "Sonnet" }],
+  qwen: [{ id: null, label: "Default (automatic)" }, { id: "qwen-local", label: "Local Qwen (qwen-local)" }],
 };
 
 afterEach(() => {
@@ -113,6 +114,32 @@ describe("Project settings page", () => {
 
     await waitFor(() => expect(apiMocks.updateProjectConfig).toHaveBeenCalledWith("proj-1", { ci_attempts: 5 }));
     await waitFor(() => expect(screen.getByText("Saved.")).toBeInTheDocument());
+  });
+
+  it("can select and persist Local Qwen with the configured model", async () => {
+    setupDefaults();
+    apiMocks.updateProject.mockResolvedValue({ ...PROJECT, agent: "qwen", model: "qwen-local" });
+    render(<ProjectSettingsPage />);
+
+    await waitFor(() => expect(screen.getByLabelText("Agent")).toBeInTheDocument());
+    await userEvent.selectOptions(screen.getByLabelText("Agent"), "qwen");
+    expect(screen.getByText(/requires a compatible OpenAI-style model server/i)).toBeInTheDocument();
+    await userEvent.selectOptions(screen.getByLabelText("Model"), "qwen-local");
+    await userEvent.click(screen.getByRole("button", { name: /Save changes/ }));
+
+    await waitFor(() => expect(apiMocks.updateProject).toHaveBeenCalledWith("proj-1", { agent: "qwen", model: "qwen-local" }));
+    await waitFor(() => expect(screen.getByText("Saved.")).toBeInTheDocument());
+  });
+
+  it("reloads an existing Local Qwen project with its model selected", async () => {
+    apiMocks.project.mockResolvedValue({ ...PROJECT, agent: "qwen", model: "qwen-local" });
+    apiMocks.projectConfig.mockResolvedValue({ ...CONFIG, config: { ...CONFIG.config, agent: "qwen" } });
+    apiMocks.agentModels.mockResolvedValue(AGENT_MODELS);
+    render(<ProjectSettingsPage />);
+
+    await waitFor(() => expect(screen.getByLabelText("Agent")).toHaveValue("qwen"));
+    expect(screen.getByLabelText("Model")).toHaveValue("qwen-local");
+    expect(screen.getByText(/requires a compatible OpenAI-style model server/i)).toBeInTheDocument();
   });
 
   it("clamps numeric input to the field's allowed range on blur", async () => {
