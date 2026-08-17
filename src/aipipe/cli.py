@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from pathlib import Path
 
+from .agents.qwen_readiness import probe_local_model_endpoint
 from .bootstrap import initialize_global, initialize_project
 from .config import home_dir, load_config
 from .orchestrator import Orchestrator, PipelineBlocked
@@ -16,7 +18,7 @@ from .util import require_binary, run
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="aipipe", description="Autonomous guarded software engineering pipeline")
     p.add_argument("--repo", default=".", help="Git repository path (default: current directory)")
-    p.add_argument("--agent", choices=["codex", "claude"], help="Override configured agent backend")
+    p.add_argument("--agent", choices=["codex", "claude", "qwen"], help="Override configured agent backend")
     sub = p.add_subparsers(dest="command", required=True)
     t = sub.add_parser("task", help="Run a task prompt through the full pipeline")
     t.add_argument("prompt")
@@ -36,11 +38,15 @@ def build_parser() -> argparse.ArgumentParser:
 def _doctor(repo: Path, agent_override: str | None) -> tuple[dict, bool]:
     cfg = load_config(repo)
     backend = agent_override or cfg.agent
-    agent_binary = (
-        cfg.codex.get("binary", "codex")
-        if backend == "codex"
-        else cfg.claude.get("binary", "claude")
-    )
+    if backend == "codex":
+        agent_binary = cfg.codex.get("binary", "codex")
+    elif backend == "claude":
+        agent_binary = cfg.claude.get("binary", "claude")
+    elif backend == "qwen":
+        agent_binary = cfg.qwen.get("binary", "qwen")
+    else:
+        raise ValueError(f"Unsupported agent backend: {backend}")
+
     report: dict[str, object] = {
         "build": build_identity(repo if (repo / ".git").exists() else None),
         "agent": backend,
@@ -58,6 +64,17 @@ def _doctor(repo: Path, agent_override: str | None) -> tuple[dict, bool]:
             record(f"binary:{binary}", True, "available")
         except Exception as exc:
             record(f"binary:{binary}", False, str(exc))
+
+    if backend == "qwen":
+        base_url = str(cfg.qwen.get("base_url") or os.environ.get("AIPIPE_LOCAL_LLM_BASE_URL", ""))
+        model = str(cfg.qwen.get("model") or os.environ.get("AIPIPE_LOCAL_LLM_MODEL", "qwen-local"))
+        readiness = probe_local_model_endpoint(
+            base_url,
+            api_key=os.environ.get("AIPIPE_LOCAL_LLM_API_KEY", ""),
+            model=model,
+            timeout_seconds=float(cfg.qwen.get("readiness_timeout_seconds", 3.0)),
+        )
+        record("local_model_endpoint", readiness.ok, f"{readiness.category}: {readiness.detail}")
 
     if (repo / ".git").exists():
         top = run(["git", "rev-parse", "--show-toplevel"], repo, timeout=10)
