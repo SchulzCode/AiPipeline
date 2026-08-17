@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any
 
 from .base import AgentResult, ModelOption, READ_ONLY_ROLES, finalize_result
-from ..util import CommandResult, require_binary, run, safe_process_env
+from ..util import require_binary, run, safe_process_env
 
 
 _AIPIPE_SYSTEM_PROMPT = """You are running inside AIpipe's managed task workspace.
