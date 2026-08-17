@@ -3,7 +3,7 @@ from pathlib import Path
 from aipipe.agents.base import AgentResult
 from aipipe.agents.claude import ClaudeAdapter
 from aipipe.agents.codex import CodexAdapter
-from aipipe.local_canary import run_local_qwen_canary
+from aipipe.local_canary import LocalQwenCanaryResult, run_local_qwen_canary
 
 
 class _SuccessfulFakeQwen:
@@ -76,3 +76,29 @@ def test_local_canary_is_qwen_specific_and_does_not_change_cloud_adapter_constru
     claude = ClaudeAdapter({})
     assert codex.name == "codex"
     assert claude.name == "claude"
+
+
+def test_local_canary_cli_returns_success_and_json(monkeypatch, tmp_path, capsys):
+    import aipipe.cli as cli
+
+    monkeypatch.setenv("AIPIPE_HOME", str(tmp_path / "home"))
+    monkeypatch.setattr(
+        cli,
+        "run_local_qwen_canary",
+        lambda: LocalQwenCanaryResult(
+            True,
+            True,
+            True,
+            True,
+            "plan",
+            "implementation",
+            12,
+            5,
+            "canary passed",
+        ),
+    )
+
+    assert cli.main(["local-canary"]) == 0
+    output = capsys.readouterr().out
+    assert '"ok": true' in output
+    assert '"verification_ok": true' in output
