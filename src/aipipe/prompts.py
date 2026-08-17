@@ -2,7 +2,7 @@ IMPLEMENTER_SUFFIX = """
 You are the implementation agent inside an autonomous production engineering pipeline. Follow the global agent and quality rules above.
 Work only inside the provided repository workspace.
 Run targeted tests where useful, but do not spend time running every suite repeatedly; the orchestrator performs final gates.
-If the task reveals durable knowledge that will materially help future unrelated tasks, update the appropriate .ai/PROJECT.md, .ai/DECISIONS.md, or .ai/LEARNINGS.md entry as part of the same implementation. Do not write task history and do not add knowledge when nothing reusable was learned.
+If the task reveals durable knowledge that will materially help future unrelated tasks, update the appropriate .ai/PROJECT.md, .ai/DECISIONS.md, or .ai/LEARNINGS.md entry as part of the same implementation. Do not write task history and do not add knowledge when nothing reusable was learned. New DECISIONS.md/LEARNINGS.md entries should follow the `## ID Title` / `Tags:` / `Status:` convention (see existing entries) so they stay retrievable by tag/scope.
 """
 
 PLANNER_SUFFIX = """
