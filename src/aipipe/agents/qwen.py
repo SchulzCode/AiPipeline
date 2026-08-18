@@ -24,12 +24,13 @@ _WRITE_CORE_TOOLS = (
     "run_shell_command",
 )
 
-# Qwen Code 0.21.x can still surface newer orchestration/builtin tools even when
-# legacy --core-tools is supplied. Keep the allowlist for registry filtering and
-# also deny AIpipe-irrelevant orchestration capabilities explicitly so an agent
-# cannot waste turns trying them if Qwen exposes one anyway.
+# Qwen Code can surface orchestration/builtin tools that AIpipe never wants its
+# bounded agents to use. Keep explicit permission-layer denies as defense in
+# depth even though role core-tools and system settings also restrict registry
+# exposure.
 _COMMON_EXCLUDE_TOOLS = (
     "agent",
+    "task",
     "list_agents",
     "task_stop",
     "send_message",
@@ -48,6 +49,37 @@ _COMMON_EXCLUDE_TOOLS = (
     "loop_wakeup",
     "create_sub_session",
     "computer_use__*",
+)
+
+# Tools that should never be registered for an AIpipe-managed Qwen subprocess.
+# Some are deferred/builtin capabilities and some are version-specific names
+# observed in Qwen 0.21.x. Exact disabling complements --core-tools rather than
+# replacing it.
+_AMBIENT_DISABLED_TOOLS = (
+    "agent",
+    "task",
+    "list_agents",
+    "task_stop",
+    "send_message",
+    "skill",
+    "enter_worktree",
+    "exit_worktree",
+    "record_artifact",
+    "get_goal",
+    "update_goal",
+    "tool_search",
+    "web_fetch",
+    "read_mcp_resource",
+    "cron_create",
+    "cron_list",
+    "cron_delete",
+    "loop_wakeup",
+    "create_sub_session",
+    "notebook_edit",
+    "read_many_files",
+    "zoom_image",
+    "todo_write",
+    "monitor",
 )
 
 # AIpipe owns Git/worktree/remote lifecycle. Implementation roles still need a
@@ -81,11 +113,11 @@ For PLANNER work, inspect concrete implementation code before producing the plan
 symbols/functions/classes, their important call sites, and the closest existing tests to extend.
 
 Do not narrate repository exploration or announce each tool call; use the read/search tools directly.
-Never call agent, list_agents, enter_worktree, exit_worktree, skill, tool_search, computer-use, or any
-session-management tool even if it appears in runtime metadata. The task contract already contains the
-issue/task requirements, so do not search the repository for the issue number or try to rediscover the
-issue description. Do not read README files unless the task directly concerns project documentation or
-overview behavior. Prefer grep/glob to locate concrete symbols, then read only the relevant files or
+Never call agent, task, list_agents, enter_worktree, exit_worktree, skill, tool_search, computer-use, or
+any session-management tool even if it appears in runtime metadata. The task contract already contains
+the issue/task requirements, so do not search the repository for the issue number or try to rediscover
+the issue description. Do not read README files unless the task directly concerns project documentation
+or overview behavior. Prefer grep/glob to locate concrete symbols, then read only the relevant files or
 sections. Once enough evidence exists, immediately produce the required plan.
 
 Do not merely restate the task requirements. If repository evidence does not support a claimed file or
@@ -144,12 +176,46 @@ def _usage_tokens(usage: Any) -> tuple[int, int]:
     return input_count, output_count
 
 
-def _parse_headless_output(stdout: str) -> tuple[str, int, int]:
-    """Parse Qwen Code's ``--output-format json`` payload.
+def _assistant_text(event: Any) -> tuple[str, tuple[int, int]]:
+    """Return only user-visible text from one Qwen assistant event."""
+    if not isinstance(event, dict) or event.get("type") != "assistant":
+        return "", (0, 0)
+    message = event.get("message")
+    if not isinstance(message, dict):
+        return "", (0, 0)
+    content = message.get("content")
+    blocks = content if isinstance(content, list) else []
+    texts = [
+        str(block.get("text", ""))
+        for block in blocks
+        if isinstance(block, dict)
+        and block.get("type") == "text"
+        and str(block.get("text", "")).strip()
+    ]
+    return "\n".join(texts).strip(), _usage_tokens(message.get("usage"))
 
-    Current Qwen Code emits a JSON array whose final ``type=result`` event
-    contains the terminal result and aggregate usage. A small dict fallback is
-    retained so adapter failure output remains useful if the CLI shape changes.
+
+def _latest_nonzero_assistant_usage(events: list[Any]) -> tuple[int, int]:
+    for event in reversed(events):
+        if not isinstance(event, dict) or event.get("type") != "assistant":
+            continue
+        message = event.get("message")
+        if not isinstance(message, dict):
+            continue
+        usage = _usage_tokens(message.get("usage"))
+        if usage != (0, 0):
+            return usage
+    return 0, 0
+
+
+def _parse_headless_output(stdout: str) -> tuple[str, int, int]:
+    """Parse Qwen Code's buffered ``--output-format json`` payload.
+
+    Prefer the terminal result envelope when present. Qwen 0.21.x can also
+    complete successfully with an event array that has no usable result event;
+    in that case return only the final text-bearing assistant message. Never
+    turn a successful structured session into persisted transcript/session
+    metadata merely because the terminal envelope shape changed.
     """
     try:
         payload = json.loads(stdout)
@@ -157,18 +223,29 @@ def _parse_headless_output(stdout: str) -> tuple[str, int, int]:
         return stdout, 0, 0
 
     if isinstance(payload, list):
-        result_event = next(
-            (event for event in reversed(payload) if isinstance(event, dict) and event.get("type") == "result"),
-            None,
-        )
-        if result_event is not None:
-            input_tokens, output_tokens = _usage_tokens(result_event.get("usage"))
-            return str(result_event.get("result", "")), input_tokens, output_tokens
+        for event in reversed(payload):
+            if not isinstance(event, dict) or event.get("type") != "result":
+                continue
+            final = event.get("result")
+            if isinstance(final, str) and final.strip():
+                input_tokens, output_tokens = _usage_tokens(event.get("usage"))
+                return final, input_tokens, output_tokens
+
+        for event in reversed(payload):
+            final, usage = _assistant_text(event)
+            if not final:
+                continue
+            if usage == (0, 0):
+                usage = _latest_nonzero_assistant_usage(payload)
+            return final, usage[0], usage[1]
+
+        return stdout, 0, 0
 
     if isinstance(payload, dict):
         input_tokens, output_tokens = _usage_tokens(payload.get("usage"))
         final = payload.get("result", payload.get("response", ""))
-        return str(final), input_tokens, output_tokens
+        if isinstance(final, str) and final.strip():
+            return final, input_tokens, output_tokens
 
     return stdout, 0, 0
 
@@ -179,6 +256,82 @@ def _core_tools_for_role(role: str) -> tuple[str, ...]:
 
 def _excluded_tools_for_role(role: str) -> tuple[str, ...]:
     return _COMMON_EXCLUDE_TOOLS if role in READ_ONLY_ROLES else _IMPLEMENTATION_EXCLUDE_TOOLS
+
+
+def _project_skill_names(workspace: Path) -> list[str]:
+    """Find project skill names so system settings can hard-disable them.
+
+    Qwen 0.21.x supports hard-disabled skill names but not a discovery-level
+    switch. Personal skills are eliminated by the ephemeral QWEN_HOME and
+    extension skills by ``-e none``; this closes the remaining project-skill
+    path without trusting project-controlled Qwen settings.
+    """
+    root = workspace / ".qwen" / "skills"
+    if not root.is_dir():
+        return []
+
+    names: set[str] = set()
+    for skill_file in root.glob("*/SKILL.md"):
+        # Directory names are valid fallback identifiers even if frontmatter is
+        # malformed or cannot be read.
+        names.add(skill_file.parent.name)
+        try:
+            prefix = skill_file.read_text(encoding="utf-8", errors="replace")[:8192]
+        except OSError:
+            continue
+        lines = prefix.splitlines()
+        if not lines or lines[0].strip() != "---":
+            continue
+        for line in lines[1:]:
+            if line.strip() == "---":
+                break
+            if not line.lstrip().startswith("name:"):
+                continue
+            name = line.split(":", 1)[1].strip().strip("\"'")
+            if name:
+                names.add(name)
+            break
+    return sorted(names)
+
+
+def _system_settings_for_role(
+    role: str,
+    context_filename: str,
+    project_skill_names: list[str],
+) -> dict[str, Any]:
+    disabled_tools = list(_AMBIENT_DISABLED_TOOLS)
+    if role in READ_ONLY_ROLES:
+        disabled_tools.extend(("edit", "write_file", "run_shell_command"))
+
+    return {
+        # Use a per-run impossible-to-guess filename instead of the default
+        # QWEN.md so repository/parent-directory instructional context is not
+        # loaded into the bounded AIpipe subprocess.
+        "context": {
+            "fileName": context_filename,
+            "includeDirectories": [],
+            "loadFromIncludeDirectories": False,
+        },
+        "tools": {
+            "disabled": sorted(set(disabled_tools)),
+            "computerUse": {"enabled": False},
+            "toolSearch": {"enabled": False},
+        },
+        "permissions": {
+            "deny": list(_excluded_tools_for_role(role)),
+        },
+        "skills": {
+            "disabled": project_skill_names,
+        },
+        "mcp": {"excluded": ["*"]},
+        "memory": {
+            "enableManagedAutoMemory": False,
+            "enableManagedAutoDream": False,
+            "enableAutoSkill": False,
+            "enableTeamMemory": False,
+            "enableTeamMemorySync": False,
+        },
+    }
 
 
 def _system_prompt_for_role(role: str) -> str:
@@ -229,10 +382,6 @@ class QwenAdapter:
             approval_mode,
             "--output-format",
             "json",
-            # Safe mode strips ambient Qwen customizations (context files, hooks,
-            # skills, MCP servers, extensions, and custom subagents). AIpipe passes
-            # every capability it needs explicitly below.
-            "--safe-mode",
             "-e",
             "none",
             "--chat-recording=false",
@@ -252,15 +401,32 @@ class QwenAdapter:
         if model:
             cmd += ["--model", str(model)]
 
-        # Every AIpipe agent run is intentionally ephemeral. Isolating QWEN_HOME
-        # prevents prior Qwen chats, user memory, skills, and global settings from
-        # leaking into a fresh agent invocation. Project files remain available
-        # through the explicitly exposed repository tools.
+        # Every AIpipe agent run is intentionally ephemeral. System settings have
+        # higher precedence than project/user settings, while QWEN_HOME removes
+        # user state altogether. This gives --core-tools a real chance to filter
+        # registration without safe-mode disabling the permission/tool settings.
         with tempfile.TemporaryDirectory(prefix="aipipe-qwen-") as qwen_home:
             process_env["QWEN_HOME"] = qwen_home
             process_env["QWEN_RUNTIME_DIR"] = qwen_home
             process_env["QWEN_USAGE_STATISTICS_ENABLED"] = "0"
             process_env["QWEN_TELEMETRY_ENABLED"] = "0"
+
+            context_filename = f".aipipe-context-disabled-{Path(qwen_home).name}.md"
+            settings_path = Path(qwen_home) / "system-settings.json"
+            settings_path.write_text(
+                json.dumps(
+                    _system_settings_for_role(
+                        role,
+                        context_filename,
+                        _project_skill_names(workspace),
+                    ),
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                ),
+                encoding="utf-8",
+            )
+            process_env["QWEN_CODE_SYSTEM_SETTINGS_PATH"] = str(settings_path)
+
             result = run(
                 cmd,
                 workspace,
