@@ -115,6 +115,7 @@ class ContextBuilder:
         findings: str = "",
         plan: str = "",
         task_map: TaskMap | None = None,
+        bounded_guidance: dict[str, list[str]] | None = None,
         *,
         budget_role: str | None = None,
     ) -> str:
@@ -139,6 +140,14 @@ class ContextBuilder:
             sections.append(_Section("# Implementation Plan\n" + truncate(plan, 10000), protected=True))
         if task_map is not None and not task_map.is_empty():
             sections.append(_Section(render_task_map(task_map), protected=True))
+        if bounded_guidance:
+            # Add bounded guidance to the context for remediation purposes
+            guidance_lines = ["# Bounded Planner Guidance"]
+            for key, items in bounded_guidance.items():
+                if items:  # Only add non-empty guidance sections
+                    guidance_lines.append(f"## {key.replace('_', ' ').title()}")
+                    guidance_lines.extend(f"- {item}" for item in items)
+            sections.append(_Section("\n".join(guidance_lines), protected=True))
         for filename in self._policy_files_for(role, task.route):
             content = self._read(self.global_root / filename, _POLICY_LIMITS[filename])
             if content:
