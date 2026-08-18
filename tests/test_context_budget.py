@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from aipipe.context import TRUNCATION_NOTICE, ContextBuilder
 from aipipe.context_budget import (
     DEFAULT_TOTAL_BUDGET_TOKENS,
@@ -306,6 +308,149 @@ def test_maximal_task_map_stays_bounded_and_does_not_crowd_out_other_protected_s
     assert "billing" in text
     assert "agent rules body" in text
     assert "# Task Map" in text
+
+
+def test_current_stage_findings_outrank_bounded_planner_guidance_under_budget_pressure(tmp_path: Path):
+    """#50: current-stage failures/findings must survive a tight budget before generic Planner guidance.
+
+    `findings` is already capped to 8000 chars at section-construction time
+    (independent of the total budget), so a large-enough `bounded_guidance`
+    payload absorbs the entire remaining excess by itself: findings comes
+    out of budget enforcement byte-for-byte identical to how it went in,
+    while the (much larger) guidance payload is cut down hard. That is
+    exactly the required precedence -- current-stage findings are never
+    the ones sacrificed to make room for generic Planner guidance.
+    """
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    repo = tmp_path / "repo"
+    (repo / ".ai").mkdir(parents=True)
+
+    task = _task(ContextClass.SMALL, acceptance_criteria=["works"])
+    builder = ContextBuilder(global_root)
+
+    huge_findings = "findingsmarker-" + ("n" * 60_000)
+    huge_guidance = {
+        "constraints": ["guidancemarker-" + ("g" * 60_000)],
+        "risks": ["riskmarker-" + ("r" * 60_000)],
+    }
+
+    text = builder.build(
+        repo,
+        task,
+        "IMPLEMENTER",
+        findings=huge_findings,
+        bounded_guidance=huge_guidance,
+        budget_role="IMPLEMENTER_REMEDIATION",
+    )
+
+    from aipipe.util import truncate as _truncate
+
+    # Findings survive exactly as constructed (only the pre-existing 8000
+    # char per-section cap applies) -- budget enforcement removes nothing
+    # further from them.
+    assert ("# Findings To Address\n" + _truncate(huge_findings, 8000)) in text
+    # Bounded guidance absorbed the pressure instead: what remains is a
+    # small fraction of the ~120,000 chars supplied.
+    guidance_start = text.index("# Bounded Planner Guidance")
+    findings_start = text.index("# Findings To Address")
+    guidance_section = text[guidance_start:findings_start]
+    assert len(guidance_section) < 30_000
+    assert TRUNCATION_NOTICE in text
+
+
+def test_task_goal_and_acceptance_criteria_outrank_bounded_planner_guidance(tmp_path: Path):
+    """#50: the task contract is never displaced by generic Planner guidance, even alone under a tiny budget."""
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    repo = tmp_path / "repo"
+    (repo / ".ai").mkdir(parents=True)
+
+    task = _task(
+        ContextClass.SMALL,
+        acceptance_criteria=["must not break auth"],
+        out_of_scope=["billing"],
+    )
+    builder = ContextBuilder(global_root)
+
+    huge_guidance = {
+        "constraints": ["c" * 60_000],
+        "risks": ["r" * 60_000],
+        "out_of_scope": ["o" * 60_000],
+    }
+
+    text = builder.build(
+        repo,
+        task,
+        "IMPLEMENTER",
+        bounded_guidance=huge_guidance,
+        budget_role="IMPLEMENTER_REMEDIATION",
+    )
+
+    budget = budget_for("IMPLEMENTER_REMEDIATION", ContextClass.SMALL)
+    assert len(text) <= budget.total_chars + 2000
+    assert "do the thing" in text
+    assert "must not break auth" in text
+    assert "# Out of Scope" in text
+    assert "billing" in text
+    # Only a small fraction of the ~180,000 chars of guidance supplied
+    # survives the tiny budget once the (untouched) task contract is paid
+    # for first.
+    assert ("c" * 60_000) not in text
+    assert ("r" * 60_000) not in text
+    assert ("o" * 60_000) not in text
+
+
+def test_bounded_planner_guidance_rendered_when_it_fits_the_budget(tmp_path: Path):
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    repo = tmp_path / "repo"
+    (repo / ".ai").mkdir(parents=True)
+    task = _task(ContextClass.NORMAL)
+    builder = ContextBuilder(global_root)
+
+    text = builder.build(
+        repo,
+        task,
+        "IMPLEMENTER",
+        bounded_guidance={"constraints": ["stay read-only"], "risks": ["breaking change"]},
+        budget_role="IMPLEMENTER_REMEDIATION",
+    )
+
+    assert "# Bounded Planner Guidance" in text
+    assert "stay read-only" in text
+    assert "breaking change" in text
+
+
+@pytest.mark.parametrize("context_class", [ContextClass.SMALL, ContextClass.NORMAL, ContextClass.DEEP])
+def test_remediation_budget_enforced_across_context_classes_with_bounded_guidance_populated(
+    tmp_path: Path, context_class: ContextClass
+):
+    """#50: SMALL/NORMAL/DEEP remediation budgets stay enforced once bounded_guidance is populated."""
+    global_root = tmp_path / "global"
+    global_root.mkdir()
+    repo = tmp_path / "repo"
+    (repo / ".ai").mkdir(parents=True)
+    task = _task(context_class)
+    builder = ContextBuilder(global_root)
+
+    text = builder.build(
+        repo,
+        task,
+        "IMPLEMENTER",
+        diff="d" * 200_000,
+        findings="f" * 200_000,
+        bounded_guidance={
+            "constraints": ["c" * 500 for _ in range(10)],
+            "risks": ["r" * 500 for _ in range(10)],
+            "out_of_scope": ["o" * 500 for _ in range(10)],
+        },
+        budget_role="IMPLEMENTER_REMEDIATION",
+    )
+
+    budget = budget_for("IMPLEMENTER_REMEDIATION", context_class)
+    assert len(text) <= budget.total_chars + 2000
+    assert "# Task" in text
 
 
 def test_backward_compatible_with_existing_small_normal_tasks(tmp_path: Path):

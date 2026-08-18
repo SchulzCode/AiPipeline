@@ -486,3 +486,76 @@ and `knowledge.py` (#48) already use; and the rendered section's own text
 reiterates the #47 precedence order (task contract over Planner guidance)
 so the map cannot be read as elevating Planner output above the task's own
 goal and acceptance criteria.
+
+## D-012 Bounded Planner guidance threaded through every remediation stage, derived once, ranked below current-stage findings
+Tags: backend, context, planning, orchestrator
+Status: active
+Severity: medium
+
+Decision:
+D-011's task-map handoff only reached the *initial* Implementer prompt;
+verification repair (`_ensure_local_gates`), review repair (`_review_gate`,
+called from `_semantic_gates_after_change`), and CI repair (extracted into
+a new `Orchestrator._run_ci_gate`, a pure extraction of `run()`'s former
+inline CI wait/repair loop with no control-flow change) never saw any
+Planner-derived guidance at all once the initial Implementer prompt was
+built. `run()` now parses the Planner's raw output into a `TaskMap` and
+calls `Orchestrator._derive_bounded_guidance_from_task_map` exactly once,
+immediately after the Planner result becomes available (or immediately with
+`task_map=None` when no Planner ran), producing a small
+`dict[str, list[str]]` containing only the `constraints`/`risks`/
+`out_of_scope` fields -- never `relevant_files`/`relevant_symbols`/
+`likely_tests` (those are initial-exploration aids, not remediation state),
+and never the raw plan text, the `TaskMap` object itself, or any provider
+session_id/cwd/tool-call history. This `bounded_guidance` dict is threaded
+as a keyword-only argument through every `IMPLEMENTER` remediation
+`context.build(...)` call (verification fix, review fix, CI fix) and into
+the nested local-gates/semantic-review re-verification each repair triggers
+-- but never into REVIEWER/SECURITY_REVIEWER's own prompt build, preserving
+their independence from Planner influence. `_build_implement_context` no
+longer parses `plan_text` itself (it takes the already-parsed `task_map` as
+a parameter) and does not also render `bounded_guidance` for the *initial*
+prompt, since `plan` + the rendered `# Task Map` section already carry the
+same content; duplicating it a third time would only crowd the context
+budget. `ContextBuilder`'s `# Bounded Planner Guidance` section changed from
+`protected=True` to optional with `drop_priority=0` (the lowest, same tier
+as decisions/learnings) -- generic Planner guidance is now the first thing
+`_enforce_budget` truncates under pressure, strictly below `# Findings To
+Address` (`drop_priority=3`) and the task contract sections (still
+protected), matching the required precedence: policy > task contract >
+current-stage findings > generic Planner guidance. No remediation path
+calls `_run_planner` or re-parses the persisted `PLAN` state event to
+recover this guidance; every repair attempt remains a fresh `_agent_run`
+(`state.start_run`) invocation, never a reused session.
+
+Reason:
+A remediation Implementer fixing a failed quality gate, an unresolved review
+finding, or a broken CI check had no access to the constraints/risks/
+out-of-scope boundaries the Planner already identified, so repeated repair
+attempts could silently drift outside them even though the information was
+available and already computed once. Deriving `bounded_guidance` a single
+time and passing only that bounded structure onward (rather than having
+each remediation site re-parse `plan_text` or re-invoke the Planner) keeps
+the guarantee from D-011 intact -- bounded, deterministic, provider-agnostic
+guidance -- while extending its reach; re-parsing per site would have
+risked drift between call sites and re-running the Planner would have
+turned a read-only, budget-bounded planning stage into an uncapped cost
+inside the remediation loop. Ranking it below current-stage findings
+follows directly from D-008's exhaustive-budget-must-shrink-something
+guarantee: a stale, generic hint about the original plan must never survive
+at the expense of the concrete, current reason a gate/review/CI check is
+failing right now.
+
+Separately, a real Qwen run was observed persisting the full raw
+`--output-format json` event/session array (including `session_id`/`cwd`/
+tool-call history) as the `PLAN` state event whenever
+`agents/qwen.py::_parse_headless_output` finds no usable `result` event or
+assistant text and falls back to raw `stdout` (`qwen.py` lines ~223-250).
+This does not break the guarantee above: `parse_task_map` only recognizes
+JSON objects containing task-map-specific keys, so a raw Qwen event dict
+(`type`, `message`, `session_id`, `cwd`, ...) is structurally never mistaken
+for a task map, and `_derive_bounded_guidance_from_task_map` degrades to
+`{}`. It is nonetheless a real hygiene/privacy defect -- raw session data
+becoming visible in the `PLAN` event/activity feed -- tracked separately
+rather than fixed here, since it is a pre-existing Qwen headless-output
+parsing gap unrelated to this task-map/remediation architecture.
