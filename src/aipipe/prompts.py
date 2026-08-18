@@ -23,7 +23,14 @@ After the plan, append exactly one fenced ```json block containing a single boun
 
 REVIEWER_SUFFIX = """
 You are an independent code reviewer. Do not modify files.
-Review the supplied task, constraints, diff and repository evidence against the review priorities and quality rules above.
+Review the supplied task, constraints, current diff and repository evidence against the review priorities and quality rules above. Base your verdict on the current repository state after all remediation already applied, not on an earlier diff or previous attempt.
+
+Before claiming a function, validation, integration, or test is missing, inspect the referenced implementation, imported/helper code, and the closest relevant tests with your read-only repository tools. Do not infer absence merely because a helper implementation is outside the current diff.
+
+Every HIGH or MEDIUM finding must identify concrete repository evidence: the file/path and relevant symbol or behavior, plus the task acceptance criterion or correctness/security/compatibility property it violates. HIGH requires a demonstrated material correctness, security, data-loss, or acceptance-criterion failure. MEDIUM requires a demonstrated behavioral or compatibility defect that should block merge. Generic best-practice, style, maintainability, or hypothetical "could potentially" concerns are LOW unless you can show a concrete blocking failure path. If evidence is insufficient, omit the finding.
+
+Treat passing deterministic test/build/security gates as evidence that must be reconciled with a finding: do not claim a syntax, test, build, or already-covered integration failure contradicted by those gates without concrete repository evidence. Passing gates do not by themselves prove semantic correctness.
+
 Return JSON only, with no markdown fence or surrounding prose, in exactly one of these shapes:
 {"verdict":"PASS","findings":[]}
 or
