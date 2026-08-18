@@ -24,10 +24,37 @@ _WRITE_CORE_TOOLS = (
     "run_shell_command",
 )
 
+# Qwen Code 0.21.x can still surface newer orchestration/builtin tools even when
+# legacy --core-tools is supplied. Keep the allowlist for registry filtering and
+# also deny AIpipe-irrelevant orchestration capabilities explicitly so an agent
+# cannot waste turns trying them if Qwen exposes one anyway.
+_COMMON_EXCLUDE_TOOLS = (
+    "agent",
+    "list_agents",
+    "task_stop",
+    "send_message",
+    "skill",
+    "enter_worktree",
+    "exit_worktree",
+    "record_artifact",
+    "get_goal",
+    "update_goal",
+    "tool_search",
+    "web_fetch",
+    "read_mcp_resource",
+    "cron_create",
+    "cron_list",
+    "cron_delete",
+    "loop_wakeup",
+    "create_sub_session",
+    "computer_use__*",
+)
+
 # AIpipe owns Git/worktree/remote lifecycle. Implementation roles still need a
 # shell for tests and local build commands, so deny GitHub/Git lifecycle commands
 # at Qwen's permission layer rather than removing shell access entirely.
 _IMPLEMENTATION_EXCLUDE_TOOLS = (
+    *_COMMON_EXCLUDE_TOOLS,
     "Bash(git *)",
     "Bash(gh *)",
 )
@@ -39,7 +66,9 @@ Always use workspace-relative paths; never reconstruct or guess the absolute wor
 AIpipe alone owns Git history, worktrees, branches, remotes, pull requests, CI, and merge lifecycle.
 Never create, enter, exit, or remove worktrees. Never commit, push, merge, rebase, reset, switch
 branches, modify remotes, or create pull requests. Do not create subagents or independent sessions.
-Do not use web, computer-use, cron, memory, or skill workflows. Use only the tools exposed for your role.
+Do not use web, computer-use, cron, memory, skill, goal-management, or artifact workflows. If Qwen
+runtime metadata happens to mention such tools, treat them as unavailable and never call them.
+Use only the tools intentionally exposed for your role.
 
 Explore purposefully: search when the relevant file or symbol is unknown, read only task-relevant code,
 avoid rereading unchanged content, and stop exploring once enough repository evidence exists to do the
@@ -49,9 +78,18 @@ Read-only roles must never modify repository state.
 
 _PLANNER_SYSTEM_PROMPT = """
 For PLANNER work, inspect concrete implementation code before producing the plan. Identify the relevant
-symbols/functions/classes, their important call sites, and the closest existing tests to extend. Do not
-merely restate the task requirements. If repository evidence does not support a claimed file or symbol,
-omit it rather than guessing. Do not write implementation code.
+symbols/functions/classes, their important call sites, and the closest existing tests to extend.
+
+Do not narrate repository exploration or announce each tool call; use the read/search tools directly.
+Never call agent, list_agents, enter_worktree, exit_worktree, skill, tool_search, computer-use, or any
+session-management tool even if it appears in runtime metadata. The task contract already contains the
+issue/task requirements, so do not search the repository for the issue number or try to rediscover the
+issue description. Do not read README files unless the task directly concerns project documentation or
+overview behavior. Prefer grep/glob to locate concrete symbols, then read only the relevant files or
+sections. Once enough evidence exists, immediately produce the required plan.
+
+Do not merely restate the task requirements. If repository evidence does not support a claimed file or
+symbol, omit it rather than guessing. Do not write implementation code.
 """
 
 # AIpipe deliberately does not set provider-generic OPENAI_* endpoint variables
@@ -139,6 +177,10 @@ def _core_tools_for_role(role: str) -> tuple[str, ...]:
     return _READ_ONLY_CORE_TOOLS if role in READ_ONLY_ROLES else _WRITE_CORE_TOOLS
 
 
+def _excluded_tools_for_role(role: str) -> tuple[str, ...]:
+    return _COMMON_EXCLUDE_TOOLS if role in READ_ONLY_ROLES else _IMPLEMENTATION_EXCLUDE_TOOLS
+
+
 def _system_prompt_for_role(role: str) -> str:
     if role == "PLANNER":
         return _AIPIPE_SYSTEM_PROMPT + _PLANNER_SYSTEM_PROMPT
@@ -187,15 +229,17 @@ class QwenAdapter:
             approval_mode,
             "--output-format",
             "json",
+            # Safe mode strips ambient Qwen customizations (context files, hooks,
+            # skills, MCP servers, extensions, and custom subagents). AIpipe passes
+            # every capability it needs explicitly below.
+            "--safe-mode",
             "-e",
             "none",
             "--chat-recording=false",
             "--core-tools",
             *_core_tools_for_role(role),
-        ]
-        if role not in READ_ONLY_ROLES:
-            cmd += ["--exclude-tools", *_IMPLEMENTATION_EXCLUDE_TOOLS]
-        cmd += [
+            "--exclude-tools",
+            *_excluded_tools_for_role(role),
             "--append-system-prompt",
             _system_prompt_for_role(role),
         ]
