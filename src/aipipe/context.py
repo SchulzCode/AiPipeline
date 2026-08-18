@@ -141,13 +141,20 @@ class ContextBuilder:
         if task_map is not None and not task_map.is_empty():
             sections.append(_Section(render_task_map(task_map), protected=True))
         if bounded_guidance:
-            # Add bounded guidance to the context for remediation purposes
+            # Bounded Planner guidance (constraints/risks/out_of_scope derived
+            # once from the parsed TaskMap) is generic, background guidance,
+            # not this run's contract or its current-stage failures. Per the
+            # required precedence (policy > task contract > current-stage
+            # findings > generic Planner guidance), it is optional and the
+            # lowest drop priority: under budget pressure it is dropped
+            # before `# Findings To Address` (and the diff), never the other
+            # way around.
             guidance_lines = ["# Bounded Planner Guidance"]
             for key, items in bounded_guidance.items():
                 if items:  # Only add non-empty guidance sections
                     guidance_lines.append(f"## {key.replace('_', ' ').title()}")
                     guidance_lines.extend(f"- {item}" for item in items)
-            sections.append(_Section("\n".join(guidance_lines), protected=True))
+            sections.append(_Section("\n".join(guidance_lines), protected=False, drop_priority=0))
         for filename in self._policy_files_for(role, task.route):
             content = self._read(self.global_root / filename, _POLICY_LIMITS[filename])
             if content:

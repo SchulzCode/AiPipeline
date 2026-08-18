@@ -2,7 +2,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from aipipe.models import FailureCategory
+from aipipe.models import FailureCategory, Risk
 from aipipe.orchestrator import Orchestrator, PipelineBlocked
 from aipipe.reliability import ReviewVerdict
 
@@ -240,6 +240,284 @@ def test_verification_blocks_after_last_fix_is_actually_rechecked():
     assert len(fix_calls) == 2
 
 
+# -- Bounded Planner guidance threaded into remediation (#50) ---------------
+#
+# `bounded_guidance` is a `dict[str, list[str]]` derived once, in `run()`,
+# from the parsed Planner `TaskMap` (see `test_bounded_guidance.py`). These
+# tests exercise the real orchestration methods that must carry it forward
+# into every remediation fix-prompt -- not a standalone extraction helper.
+
+
+def test_ensure_local_gates_threads_bounded_guidance_into_fix_prompt():
+    orch = _orchestrator()
+    results = iter([
+        (False, False, True, True, "tests failed"),
+        (True, True, True, True, ""),
+    ])
+    orch._run_local_gates = lambda *args, **kwargs: next(results)
+    orch._agent_run = lambda *args, **kwargs: _agent_result()
+    bounded_guidance = {"constraints": ["stay read-only"]}
+
+    orch._ensure_local_gates(
+        1,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        quality_kind="quality",
+        security_kind="security",
+        max_repairs=2,
+        failure_category=FailureCategory.QUALITY_FAILURE,
+        failure_message="verification failed",
+        bounded_guidance=bounded_guidance,
+    )
+
+    (_, kwargs) = orch.context.build_calls[-1]
+    assert kwargs["bounded_guidance"] == bounded_guidance
+
+
+def test_ensure_local_gates_defaults_bounded_guidance_to_none_for_compatibility():
+    orch = _orchestrator()
+    results = iter([
+        (False, False, True, True, "tests failed"),
+        (True, True, True, True, ""),
+    ])
+    orch._run_local_gates = lambda *args, **kwargs: next(results)
+    orch._agent_run = lambda *args, **kwargs: _agent_result()
+
+    orch._ensure_local_gates(
+        1,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        quality_kind="quality",
+        security_kind="security",
+        max_repairs=2,
+        failure_category=FailureCategory.QUALITY_FAILURE,
+        failure_message="verification failed",
+    )
+
+    (_, kwargs) = orch.context.build_calls[-1]
+    assert kwargs["bounded_guidance"] is None
+
+
+def test_review_gate_threads_bounded_guidance_to_fix_prompt_and_nested_local_gates_not_own_prompt():
+    orch = _orchestrator(review_attempts=2)
+    verdicts = iter([ReviewVerdict.FINDINGS, ReviewVerdict.PASS])
+    orch._invoke_review = lambda *args, **kwargs: (next(verdicts), "FINDINGS\n- MEDIUM: fix me", "hash")
+    orch._agent_run = lambda *args, **kwargs: _agent_result()
+    nested_ensure_calls = []
+    orch._ensure_local_gates = lambda *args, **kwargs: (nested_ensure_calls.append(kwargs) or (True, True, True))
+
+    bounded_guidance = {"risks": ["breaking change"]}
+
+    orch._review_gate(
+        1,
+        "REVIEWER",
+        "REVIEW",
+        "suffix",
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        category=FailureCategory.REVIEW_FAILURE,
+        failure_message="review failed",
+        bounded_guidance=bounded_guidance,
+    )
+
+    # REVIEWER's own prompt builds (role positional arg) must never receive
+    # Planner guidance, to preserve independent review (#50 constraint).
+    reviewer_builds = [kw for (a, kw) in orch.context.build_calls if a[2] == "REVIEWER"]
+    assert reviewer_builds
+    assert all("bounded_guidance" not in kw for kw in reviewer_builds)
+    # The IMPLEMENTER fix-prompt build must receive it.
+    fix_builds = [kw for (a, kw) in orch.context.build_calls if a[2] == "IMPLEMENTER"]
+    assert fix_builds
+    assert fix_builds[-1]["bounded_guidance"] == bounded_guidance
+    # ... and so must the nested local-gates re-verification after the fix.
+    assert nested_ensure_calls[-1]["bounded_guidance"] == bounded_guidance
+
+
+def test_semantic_gates_after_change_forwards_bounded_guidance_to_both_review_gates():
+    orch = _orchestrator()
+    orch._confirmation_review = lambda *args, **kwargs: "confirmed-hash"
+    review_gate_calls = []
+    orch._review_gate = lambda *args, **kwargs: (review_gate_calls.append(kwargs) or ("hash", 0))
+
+    bounded_guidance = {"out_of_scope": ["billing"]}
+    route = SimpleNamespace(risk=Risk.HIGH)
+
+    orch._semantic_gates_after_change(
+        1,
+        route,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        bounded_guidance=bounded_guidance,
+    )
+
+    assert len(review_gate_calls) == 2  # REVIEWER, then SECURITY_REVIEWER for HIGH risk
+    assert review_gate_calls[0]["bounded_guidance"] == bounded_guidance
+    assert review_gate_calls[1]["bounded_guidance"] == bounded_guidance
+
+
+def test_run_ci_gate_threads_bounded_guidance_into_fix_prompt_and_nested_gates():
+    orch = _orchestrator()
+    orch.config.ci_attempts = 2
+    orch.github = SimpleNamespace(failed_run_logs=lambda *args, **kwargs: "")
+    ci_states = iter([("fail", [{"bucket": "fail"}]), ("pass", [])])
+    orch._wait_for_ci = lambda worktree, pr: next(ci_states)
+    orch._wait_for_pr_head = lambda *args, **kwargs: {}
+    orch._agent_run = lambda *args, **kwargs: _agent_result()
+    orch.git = SimpleNamespace(
+        diff=lambda wt: "diff",
+        status=lambda wt: "M file.py",
+        commit=lambda wt, msg: "sha-new",
+        push=lambda wt, branch: None,
+        head=lambda wt: "sha-new",
+    )
+    ensure_calls = []
+    orch._ensure_local_gates = lambda *args, **kwargs: (ensure_calls.append(kwargs) or (True, True, True))
+    semantic_calls = []
+    orch._semantic_gates_after_change = lambda *args, **kwargs: (semantic_calls.append(kwargs) or (True, True))
+    orch._run_local_gates = lambda *args, **kwargs: (True, True, True, True, "")
+
+    bounded_guidance = {"constraints": ["stay read-only"]}
+
+    result = orch._run_ci_gate(
+        "T-1",
+        1,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        "branch",
+        42,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        "sha-old",
+        True,
+        True,
+        True,
+        True,
+        True,
+        bounded_guidance=bounded_guidance,
+    )
+
+    commit_sha, quality_ok, secret_ok, sec_cmd_ok, review_ok, security_review_ok, ci_ok = result
+    assert ci_ok is True
+    assert commit_sha == "sha-new"
+
+    (_, fix_kwargs) = orch.context.build_calls[-1]
+    assert fix_kwargs["bounded_guidance"] == bounded_guidance
+    assert ensure_calls[-1]["bounded_guidance"] == bounded_guidance
+    assert semantic_calls[-1]["bounded_guidance"] == bounded_guidance
+
+
+def test_remediation_paths_never_invoke_the_planner():
+    """Planner must not be re-run merely because remediation is needed (#50).
+
+    None of `_ensure_local_gates`, `_review_gate`, or `_run_ci_gate` may call
+    `_run_planner`; `bounded_guidance` is threaded through as already-derived
+    state instead of being recovered by re-planning.
+    """
+    orch = _orchestrator()
+    orch.config.ci_attempts = 2
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("Planner must not be re-invoked during remediation")
+
+    orch._run_planner = fail_if_called
+    bounded_guidance = {"constraints": ["c"]}
+
+    gate_results = iter([(False, False, True, True, "fail"), (True, True, True, True, "")])
+    orch._run_local_gates = lambda *args, **kwargs: next(gate_results)
+    orch._agent_run = lambda *args, **kwargs: _agent_result()
+    orch._ensure_local_gates(
+        1,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        quality_kind="quality",
+        security_kind="security",
+        max_repairs=2,
+        failure_category=FailureCategory.QUALITY_FAILURE,
+        failure_message="x",
+        bounded_guidance=bounded_guidance,
+    )
+
+    verdicts = iter([ReviewVerdict.FINDINGS, ReviewVerdict.PASS])
+    orch._invoke_review = lambda *args, **kwargs: (next(verdicts), "FINDINGS", "hash")
+    orch._ensure_local_gates = lambda *args, **kwargs: (True, True, True)
+    orch._review_gate(
+        1,
+        "REVIEWER",
+        "REVIEW",
+        "suffix",
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        category=FailureCategory.REVIEW_FAILURE,
+        failure_message="x",
+        bounded_guidance=bounded_guidance,
+    )
+
+    ci_states = iter([("fail", []), ("pass", [])])
+    orch._wait_for_ci = lambda *args, **kwargs: next(ci_states)
+    orch._wait_for_pr_head = lambda *args, **kwargs: {}
+    orch.github = SimpleNamespace(failed_run_logs=lambda *args, **kwargs: "")
+    orch.git = SimpleNamespace(
+        diff=lambda wt: "diff",
+        status=lambda wt: "M x",
+        commit=lambda wt, msg: "s",
+        push=lambda wt, branch: None,
+        head=lambda wt: "s",
+    )
+    orch._semantic_gates_after_change = lambda *args, **kwargs: (True, True)
+    orch._run_local_gates = lambda *args, **kwargs: (True, True, True, True, "")
+    orch._run_ci_gate(
+        "T-1",
+        1,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        SimpleNamespace(),
+        "branch",
+        1,
+        SimpleNamespace(),
+        SimpleNamespace(),
+        "sha",
+        True,
+        True,
+        True,
+        True,
+        True,
+        bounded_guidance=bounded_guidance,
+    )
+
+
+def test_agent_run_starts_a_fresh_run_every_invocation():
+    """Every remediation attempt is a fresh agent run, never a reused session (#50)."""
+    orch = _orchestrator()
+    orch.agent = SimpleNamespace(name="test-agent", run=lambda role, prompt, workspace: _agent_result())
+    calls = []
+
+    def start_run(task_id, role, backend, attempt):
+        calls.append((role, backend, attempt))
+        return len(calls)
+
+    orch.state.start_run = start_run
+    orch.state.finish_run = lambda *args, **kwargs: None
+    orch.state.record_usage = lambda *args, **kwargs: None
+
+    orch._agent_run(1, "IMPLEMENTER", "prompt-1", SimpleNamespace(), 1)
+    orch._agent_run(1, "IMPLEMENTER", "prompt-2", SimpleNamespace(), 2)
+
+    assert calls == [("IMPLEMENTER", "test-agent", 1), ("IMPLEMENTER", "test-agent", 2)]
+
+
 def test_planner_returns_plan_on_first_success():
     orch = _orchestrator(planner_attempts=2)
     calls = []
@@ -324,31 +602,45 @@ def test_planner_mutating_the_worktree_is_blocked_as_state_inconsistency():
 
 
 # -- Planner -> Implementer task-map handoff (#49) --------------------------
+#
+# `_build_implement_context` no longer parses `plan_text` itself (see #50):
+# `run()` parses the Planner's raw output into a `TaskMap` exactly once and
+# passes the already-parsed result in, so every test below constructs the
+# `task_map` the same way `run()` now does (`parse_task_map(plan_text)`)
+# instead of relying on the callee to do it.
 
 
 def test_build_implement_context_passes_parsed_task_map_to_context_build():
+    from aipipe.task_map import parse_task_map
+
     orch = _orchestrator()
     plan_text = (
         "Goal\nDo the thing.\n\n"
         '```json\n{"relevant_files": ["a.py"], "constraints": ["stay read-only"]}\n```\n'
     )
+    task_map = parse_task_map(plan_text)
 
-    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), plan_text)
+    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), plan_text, task_map)
 
     (args, kwargs) = orch.context.build_calls[-1]
     assert args[2] == "IMPLEMENTER"
     assert kwargs["plan"] == plan_text
-    task_map = kwargs["task_map"]
-    assert task_map is not None
-    assert task_map.relevant_files == ("a.py",)
-    assert task_map.constraints == ("stay read-only",)
+    built_task_map = kwargs["task_map"]
+    assert built_task_map is not None
+    assert built_task_map.relevant_files == ("a.py",)
+    assert built_task_map.constraints == ("stay read-only",)
+    # The initial Implementer prompt already carries the same
+    # constraints/risks/out-of-scope content via `plan` + `task_map`;
+    # duplicating it a third time as `bounded_guidance` would only crowd the
+    # context budget, so the initial build must not receive it (#50).
+    assert "bounded_guidance" not in kwargs
 
 
 def test_build_implement_context_degrades_to_no_task_map_when_plan_has_no_json():
     orch = _orchestrator()
     plan_text = "Goal\nDo the thing.\nNo JSON task map included.\n"
 
-    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), plan_text)
+    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), plan_text, None)
 
     (args, kwargs) = orch.context.build_calls[-1]
     assert kwargs["plan"] == plan_text
@@ -358,7 +650,7 @@ def test_build_implement_context_degrades_to_no_task_map_when_plan_has_no_json()
 def test_build_implement_context_degrades_to_no_task_map_when_plan_is_empty():
     orch = _orchestrator()
 
-    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), "")
+    orch._build_implement_context(SimpleNamespace(), SimpleNamespace(), "", None)
 
     (args, kwargs) = orch.context.build_calls[-1]
     assert kwargs["plan"] == ""

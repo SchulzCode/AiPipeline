@@ -32,7 +32,7 @@ from .router import acceptance_from_text, planner_required, route_task
 from .security import SecurityEngine, scan_added_diff
 from .setup_engine import SetupEngine
 from .state import StateStore
-from .task_map import parse_task_map
+from .task_map import TaskMap, parse_task_map
 from .util import truncate
 
 
@@ -346,6 +346,7 @@ class Orchestrator:
         max_repairs: int,
         failure_category: FailureCategory,
         failure_message: str,
+        bounded_guidance: dict[str, list[str]] | None = None,
     ) -> tuple[bool, bool, bool]:
         repairs = 0
         last_feedback = ""
@@ -378,6 +379,7 @@ class Orchestrator:
                     self.git.diff(worktree),
                     feedback,
                     budget_role="IMPLEMENTER_REMEDIATION",
+                    bounded_guidance=bounded_guidance,
                 )
                 + "\n\n"
                 + IMPLEMENTER_SUFFIX
@@ -501,6 +503,7 @@ class Orchestrator:
         *,
         category: FailureCategory,
         failure_message: str,
+        bounded_guidance: dict[str, list[str]] | None = None,
     ) -> tuple[str, int]:
         review_number = 0
         remediations = 0
@@ -544,6 +547,7 @@ class Orchestrator:
                     diff,
                     raw_output,
                     budget_role="IMPLEMENTER_REMEDIATION",
+                    bounded_guidance=bounded_guidance,
                 )
                 + "\n\n"
                 + IMPLEMENTER_SUFFIX
@@ -574,6 +578,7 @@ class Orchestrator:
                 max_repairs=self.config.verification_attempts,
                 failure_category=FailureCategory.QUALITY_FAILURE,
                 failure_message="Review remediation could not restore deterministic local gates.",
+                bounded_guidance=bounded_guidance,
             )
 
     def _confirmation_review(
@@ -665,6 +670,8 @@ class Orchestrator:
         worktree: Path,
         quality: QualityEngine,
         security: SecurityEngine,
+        *,
+        bounded_guidance: dict[str, list[str]] | None = None,
     ) -> tuple[bool, bool]:
         review_ok = route.risk == Risk.LOW
         security_review_ok = route.risk != Risk.HIGH
@@ -683,6 +690,7 @@ class Orchestrator:
                 security,
                 category=FailureCategory.REVIEW_FAILURE,
                 failure_message="Independent review did not pass within the bounded remediation budget.",
+                bounded_guidance=bounded_guidance,
             )
             review_ok = True
 
@@ -698,6 +706,7 @@ class Orchestrator:
                 security,
                 category=FailureCategory.SECURITY_FAILURE,
                 failure_message="Independent security review did not pass within the bounded remediation budget.",
+                bounded_guidance=bounded_guidance,
             )
             security_review_ok = True
 
@@ -833,33 +842,38 @@ class Orchestrator:
         worktree: Path,
         contract: TaskContract,
         plan_text: str,
+        task_map: TaskMap | None,
     ) -> str:
         """Build the initial Implementer prompt, including the Planner's task map when usable.
 
-        Parsing is pure/local (no extra agent call): a missing or malformed
-        task map in `plan_text` simply yields `task_map=None`, which
-        degrades to the current no-task-map Implementer prompt rather than
-        blocking the task.
+        `task_map` is parsed once by the caller (`run()`) from the Planner's
+        raw output and passed in already-parsed, rather than being re-parsed
+        here: this is the single derivation point for the bounded Planner
+        guidance that later remediation stages also consume, so a missing or
+        malformed task map degrades once, consistently, everywhere. The
+        initial Implementer prompt deliberately does not also render
+        `bounded_guidance` here: `plan` and `task_map` already carry the same
+        constraints/risks/out-of-scope content, and duplicating it a third
+        time would only crowd the context budget without adding information.
         """
-        task_map = parse_task_map(plan_text) if plan_text else None
-        # Extract bounded guidance from task map for use in remediation
-        # This ensures that remediation only uses bounded, deterministic guidance
-        # that is derived from the parsed TaskMap, not raw Planner transcripts
-        bounded_guidance = self._derive_bounded_guidance_from_task_map(task_map) if task_map else None
         return (
-            self.context.build(worktree, contract, "IMPLEMENTER", plan=plan_text, task_map=task_map, bounded_guidance=bounded_guidance)
+            self.context.build(worktree, contract, "IMPLEMENTER", plan=plan_text, task_map=task_map)
             + "\n\n"
             + IMPLEMENTER_SUFFIX
         )
 
     def _derive_bounded_guidance_from_task_map(self, task_map: TaskMap | None) -> dict[str, list[str]]:
         """Derive bounded, deterministic Planner guidance from a parsed TaskMap.
-        
-        This guidance is used in remediation to ensure that no raw Planner
-        transcripts or session IDs become part of remediation state.
+
+        Called exactly once, in `run()`, as soon as the Planner's result is
+        available. The returned dict[str, list[str]] is the only Planner-derived
+        state later remediation stages (verification, review, CI) carry
+        forward -- never the raw plan text, TaskMap object, provider
+        session_id/cwd, tool-call history, or transcript -- so remediation
+        continuity never requires re-parsing the persisted PLAN event or
+        re-running the Planner.
         """
-        # Extract only the relevant fields that provide actionable guidance
-        guidance = {}
+        guidance: dict[str, list[str]] = {}
         if task_map and task_map.constraints:
             guidance["constraints"] = list(task_map.constraints)
         if task_map and task_map.risks:
@@ -1173,11 +1187,19 @@ class Orchestrator:
             self.state.set_status(public_id, TaskStatus.DISCOVERY)
             self.state.set_status(public_id, TaskStatus.PLANNING)
             plan_text = ""
+            task_map: TaskMap | None = None
             if planner_required(route.context_class, self.config):
                 plan_text = self._run_planner(task_db_id, contract, worktree)
+                task_map = parse_task_map(plan_text) if plan_text else None
+            # Derived exactly once, right here, from the parsed Planner
+            # TaskMap. Every later remediation stage (verification, review,
+            # CI) receives only this bounded dict onward -- never the raw
+            # plan text/TaskMap object, and the Planner is never re-run or
+            # re-parsed from the persisted PLAN event to recover it.
+            bounded_guidance = self._derive_bounded_guidance_from_task_map(task_map)
             self.state.set_status(public_id, TaskStatus.IMPLEMENTING)
 
-            implement_context = self._build_implement_context(worktree, contract, plan_text)
+            implement_context = self._build_implement_context(worktree, contract, plan_text, task_map)
             self._run_implementer(task_db_id, implement_context, worktree)
 
             quality = QualityEngine(
@@ -1203,6 +1225,7 @@ class Orchestrator:
                 max_repairs=self.config.verification_attempts,
                 failure_category=FailureCategory.QUALITY_FAILURE,
                 failure_message="Verification retry budget exhausted.",
+                bounded_guidance=bounded_guidance,
             )
 
             self.state.set_status(public_id, TaskStatus.REVIEWING)
@@ -1213,6 +1236,7 @@ class Orchestrator:
                 worktree,
                 quality,
                 security,
+                bounded_guidance=bounded_guidance,
             )
 
             # Deterministic final gates are intentionally non-remediating: a
@@ -1257,111 +1281,32 @@ class Orchestrator:
             self._wait_for_pr_head(worktree, pr, commit_sha)
 
             self.state.set_status(public_id, TaskStatus.CI)
-            ci_repairs = 0
-            ci_ok = False
-
-            while True:
-                state, checks = self._wait_for_ci(worktree, pr)
-                self.state.event(task_db_id, "CI", json.dumps(checks)[:9000])
-                if state == "pass":
-                    ci_ok = True
-                    break
-                if state == "none":
-                    raise PipelineBlocked(
-                        "No GitHub CI checks were found after the registration grace period; refusing to merge without CI evidence.",
-                        FailureCategory.REMOTE_STATE_MISMATCH,
-                    )
-                if state == "timeout":
-                    raise PipelineBlocked(
-                        "GitHub CI remained pending until the configured timeout.",
-                        FailureCategory.TRANSIENT_EXTERNAL,
-                    )
-                if ci_repairs >= self.config.ci_attempts:
-                    raise PipelineBlocked(
-                        "CI failed after the bounded repair budget was exhausted.",
-                        FailureCategory.QUALITY_FAILURE,
-                    )
-
-                ci_repairs += 1
-                failure = json.dumps(
-                    [c for c in checks if c.get("bucket") == "fail"],
-                    indent=2,
-                )
-                failed_logs = self.github.failed_run_logs(
-                    worktree,
-                    branch,
-                    self.git.head(worktree),
-                )
-                ci_context = "CI failure metadata:\n" + failure
-                if failed_logs:
-                    ci_context += "\n\nFailed GitHub Actions steps/logs:\n" + truncate(failed_logs, 12000)
-                fix_prompt = (
-                    self.context.build(
-                        worktree,
-                        contract,
-                        "IMPLEMENTER",
-                        self.git.diff(worktree),
-                        ci_context,
-                        budget_role="IMPLEMENTER_REMEDIATION",
-                    )
-                    + "\n\n"
-                    + IMPLEMENTER_SUFFIX
-                )
-                fix = self._agent_run(
-                    task_db_id,
-                    "IMPLEMENTER",
-                    fix_prompt,
-                    worktree,
-                    ci_repairs,
-                )
-                self.state.event(
-                    task_db_id,
-                    "CI_REMEDIATION",
-                    f"attempt={ci_repairs} rc={fix.returncode}\n{truncate(fix.output, 5000)}",
-                )
-                if not fix.ok or not self.git.status(worktree).strip():
-                    continue
-
-                self._ensure_local_gates(
-                    task_db_id,
-                    worktree,
-                    contract,
-                    quality,
-                    security,
-                    quality_kind="quality-ci-fix",
-                    security_kind="security-ci-fix",
-                    max_repairs=self.config.verification_attempts,
-                    failure_category=FailureCategory.QUALITY_FAILURE,
-                    failure_message="CI repair could not restore local gates.",
-                )
-                review_ok, security_review_ok = self._semantic_gates_after_change(
-                    task_db_id,
-                    route,
-                    contract,
-                    worktree,
-                    quality,
-                    security,
-                )
-                final_ok, quality_ok, secret_ok, sec_cmd_ok, _ = self._run_local_gates(
-                    task_db_id,
-                    worktree,
-                    quality,
-                    security,
-                    "quality-ci-final",
-                    "security-ci-final",
-                )
-                if not final_ok:
-                    raise PipelineBlocked(
-                        "Final local gates failed after CI remediation review.",
-                        FailureCategory.QUALITY_FAILURE,
-                    )
-
-                self.git.commit(worktree, f"{public_id}: fix CI")
-                self.git.push(worktree, branch)
-                commit_sha = self.git.head(worktree)
-                self._wait_for_pr_head(worktree, pr, commit_sha)
-                # Loop back to CI. Even the final permitted repair receives a
-                # fresh CI verdict before the budget can terminate.
+            (
+                commit_sha,
+                quality_ok,
+                secret_ok,
+                sec_cmd_ok,
+                review_ok,
+                security_review_ok,
+                ci_ok,
+            ) = self._run_ci_gate(
+                public_id,
+                task_db_id,
+                route,
+                contract,
+                worktree,
+                branch,
+                pr,
+                quality,
+                security,
+                commit_sha,
+                quality_ok,
+                secret_ok,
+                sec_cmd_ok,
+                review_ok,
+                security_review_ok,
+                bounded_guidance=bounded_guidance,
+            )
 
             pr_state = self._wait_for_pr_head(worktree, pr, commit_sha)
             merge_state = str(pr_state.get("state") or "").upper()
@@ -1467,6 +1412,145 @@ class Orchestrator:
                         "CLEANUP_WARNING",
                         truncate(str(exc), 4000),
                     )
+
+    def _run_ci_gate(
+        self,
+        public_id: str,
+        task_db_id: int,
+        route,
+        contract: TaskContract,
+        worktree: Path,
+        branch: str,
+        pr: int,
+        quality: QualityEngine,
+        security: SecurityEngine,
+        commit_sha: str,
+        quality_ok: bool,
+        secret_ok: bool,
+        sec_cmd_ok: bool,
+        review_ok: bool,
+        security_review_ok: bool,
+        *,
+        bounded_guidance: dict[str, list[str]] | None = None,
+    ) -> tuple[str, bool, bool, bool, bool, bool, bool]:
+        """Wait for CI and, on failure, repair within the bounded CI-repair budget.
+
+        Each repair attempt is a fresh Implementer agent run (see
+        `_agent_run`/`start_run`): the Planner is never re-invoked here, and
+        `bounded_guidance` -- derived once in `run()` -- is the only
+        Planner-derived state threaded into the repair prompt and into the
+        nested local-gates/semantic-review re-verification.
+        """
+        ci_repairs = 0
+        ci_ok = False
+
+        while True:
+            state, checks = self._wait_for_ci(worktree, pr)
+            self.state.event(task_db_id, "CI", json.dumps(checks)[:9000])
+            if state == "pass":
+                ci_ok = True
+                break
+            if state == "none":
+                raise PipelineBlocked(
+                    "No GitHub CI checks were found after the registration grace period; refusing to merge without CI evidence.",
+                    FailureCategory.REMOTE_STATE_MISMATCH,
+                )
+            if state == "timeout":
+                raise PipelineBlocked(
+                    "GitHub CI remained pending until the configured timeout.",
+                    FailureCategory.TRANSIENT_EXTERNAL,
+                )
+            if ci_repairs >= self.config.ci_attempts:
+                raise PipelineBlocked(
+                    "CI failed after the bounded repair budget was exhausted.",
+                    FailureCategory.QUALITY_FAILURE,
+                )
+
+            ci_repairs += 1
+            failure = json.dumps(
+                [c for c in checks if c.get("bucket") == "fail"],
+                indent=2,
+            )
+            failed_logs = self.github.failed_run_logs(
+                worktree,
+                branch,
+                self.git.head(worktree),
+            )
+            ci_context = "CI failure metadata:\n" + failure
+            if failed_logs:
+                ci_context += "\n\nFailed GitHub Actions steps/logs:\n" + truncate(failed_logs, 12000)
+            fix_prompt = (
+                self.context.build(
+                    worktree,
+                    contract,
+                    "IMPLEMENTER",
+                    self.git.diff(worktree),
+                    ci_context,
+                    budget_role="IMPLEMENTER_REMEDIATION",
+                    bounded_guidance=bounded_guidance,
+                )
+                + "\n\n"
+                + IMPLEMENTER_SUFFIX
+            )
+            fix = self._agent_run(
+                task_db_id,
+                "IMPLEMENTER",
+                fix_prompt,
+                worktree,
+                ci_repairs,
+            )
+            self.state.event(
+                task_db_id,
+                "CI_REMEDIATION",
+                f"attempt={ci_repairs} rc={fix.returncode}\n{truncate(fix.output, 5000)}",
+            )
+            if not fix.ok or not self.git.status(worktree).strip():
+                continue
+
+            self._ensure_local_gates(
+                task_db_id,
+                worktree,
+                contract,
+                quality,
+                security,
+                quality_kind="quality-ci-fix",
+                security_kind="security-ci-fix",
+                max_repairs=self.config.verification_attempts,
+                failure_category=FailureCategory.QUALITY_FAILURE,
+                failure_message="CI repair could not restore local gates.",
+                bounded_guidance=bounded_guidance,
+            )
+            review_ok, security_review_ok = self._semantic_gates_after_change(
+                task_db_id,
+                route,
+                contract,
+                worktree,
+                quality,
+                security,
+                bounded_guidance=bounded_guidance,
+            )
+            final_ok, quality_ok, secret_ok, sec_cmd_ok, _ = self._run_local_gates(
+                task_db_id,
+                worktree,
+                quality,
+                security,
+                "quality-ci-final",
+                "security-ci-final",
+            )
+            if not final_ok:
+                raise PipelineBlocked(
+                    "Final local gates failed after CI remediation review.",
+                    FailureCategory.QUALITY_FAILURE,
+                )
+
+            self.git.commit(worktree, f"{public_id}: fix CI")
+            self.git.push(worktree, branch)
+            commit_sha = self.git.head(worktree)
+            self._wait_for_pr_head(worktree, pr, commit_sha)
+            # Loop back to CI. Even the final permitted repair receives a
+            # fresh CI verdict before the budget can terminate.
+
+        return commit_sha, quality_ok, secret_ok, sec_cmd_ok, review_ok, security_review_ok, ci_ok
 
     def _agent_run(
         self,
