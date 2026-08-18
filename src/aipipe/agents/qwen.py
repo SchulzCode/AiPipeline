@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -10,11 +11,47 @@ from .qwen_readiness import QwenReadinessError, probe_local_model_endpoint
 from ..util import require_binary, run, safe_process_env
 
 
-_AIPIPE_SYSTEM_PROMPT = """You are running inside AIpipe's managed task workspace.
-AIpipe owns Git history and remote lifecycle operations. Do not commit, push, merge,
-rebase, create pull requests, change branches, or modify remotes. Work only inside
-the supplied workspace. Implementation and repair roles may edit source files and
-run relevant local verification. Read-only roles must not modify the workspace.
+_READ_ONLY_CORE_TOOLS = (
+    "read_file",
+    "grep_search",
+    "glob",
+    "list_directory",
+)
+_WRITE_CORE_TOOLS = (
+    *_READ_ONLY_CORE_TOOLS,
+    "edit",
+    "write_file",
+    "run_shell_command",
+)
+
+# AIpipe owns Git/worktree/remote lifecycle. Implementation roles still need a
+# shell for tests and local build commands, so deny GitHub/Git lifecycle commands
+# at Qwen's permission layer rather than removing shell access entirely.
+_IMPLEMENTATION_EXCLUDE_TOOLS = (
+    "Bash(git *)",
+    "Bash(gh *)",
+)
+
+_AIPIPE_SYSTEM_PROMPT = """You are one bounded agent inside AIpipe's managed task workspace.
+The current working directory is already the correct AIpipe-managed worktree.
+Always use workspace-relative paths; never reconstruct or guess the absolute workspace path.
+
+AIpipe alone owns Git history, worktrees, branches, remotes, pull requests, CI, and merge lifecycle.
+Never create, enter, exit, or remove worktrees. Never commit, push, merge, rebase, reset, switch
+branches, modify remotes, or create pull requests. Do not create subagents or independent sessions.
+Do not use web, computer-use, cron, memory, or skill workflows. Use only the tools exposed for your role.
+
+Explore purposefully: search when the relevant file or symbol is unknown, read only task-relevant code,
+avoid rereading unchanged content, and stop exploring once enough repository evidence exists to do the
+assigned role. Implementation and repair roles may edit source files and run relevant local verification.
+Read-only roles must never modify repository state.
+"""
+
+_PLANNER_SYSTEM_PROMPT = """
+For PLANNER work, inspect concrete implementation code before producing the plan. Identify the relevant
+symbols/functions/classes, their important call sites, and the closest existing tests to extend. Do not
+merely restate the task requirements. If repository evidence does not support a claimed file or symbol,
+omit it rather than guessing. Do not write implementation code.
 """
 
 # AIpipe deliberately does not set provider-generic OPENAI_* endpoint variables
@@ -98,6 +135,16 @@ def _parse_headless_output(stdout: str) -> tuple[str, int, int]:
     return stdout, 0, 0
 
 
+def _core_tools_for_role(role: str) -> tuple[str, ...]:
+    return _READ_ONLY_CORE_TOOLS if role in READ_ONLY_ROLES else _WRITE_CORE_TOOLS
+
+
+def _system_prompt_for_role(role: str) -> str:
+    if role == "PLANNER":
+        return _AIPIPE_SYSTEM_PROMPT + _PLANNER_SYSTEM_PROMPT
+    return _AIPIPE_SYSTEM_PROMPT
+
+
 class QwenAdapter:
     name = "qwen"
 
@@ -140,8 +187,17 @@ class QwenAdapter:
             approval_mode,
             "--output-format",
             "json",
+            "-e",
+            "none",
+            "--chat-recording=false",
+            "--core-tools",
+            *_core_tools_for_role(role),
+        ]
+        if role not in READ_ONLY_ROLES:
+            cmd += ["--exclude-tools", *_IMPLEMENTATION_EXCLUDE_TOOLS]
+        cmd += [
             "--append-system-prompt",
-            _AIPIPE_SYSTEM_PROMPT,
+            _system_prompt_for_role(role),
         ]
 
         process_env, local_env = _local_subprocess_env(self.runtime_env)
@@ -152,12 +208,21 @@ class QwenAdapter:
         if model:
             cmd += ["--model", str(model)]
 
-        result = run(
-            cmd,
-            workspace,
-            self.timeout,
-            env=process_env,
-            inherit_env=False,
-        )
+        # Every AIpipe agent run is intentionally ephemeral. Isolating QWEN_HOME
+        # prevents prior Qwen chats, user memory, skills, and global settings from
+        # leaking into a fresh agent invocation. Project files remain available
+        # through the explicitly exposed repository tools.
+        with tempfile.TemporaryDirectory(prefix="aipipe-qwen-") as qwen_home:
+            process_env["QWEN_HOME"] = qwen_home
+            process_env["QWEN_RUNTIME_DIR"] = qwen_home
+            process_env["QWEN_USAGE_STATISTICS_ENABLED"] = "0"
+            process_env["QWEN_TELEMETRY_ENABLED"] = "0"
+            result = run(
+                cmd,
+                workspace,
+                self.timeout,
+                env=process_env,
+                inherit_env=False,
+            )
         final, input_tokens, output_tokens = _parse_headless_output(result.stdout)
         return finalize_result(result, final or result.stdout, input_tokens, output_tokens)
