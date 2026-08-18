@@ -30,6 +30,20 @@ def _array_option(cmd: list[str], name: str) -> list[str]:
     return values
 
 
+def _assert_common_qwen_denies(values: list[str]) -> None:
+    for tool in (
+        "agent",
+        "list_agents",
+        "skill",
+        "enter_worktree",
+        "exit_worktree",
+        "tool_search",
+        "web_fetch",
+        "computer_use__*",
+    ):
+        assert tool in values
+
+
 def test_qwen_adapter_builds_headless_json_command(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("aipipe.agents.qwen.require_binary", lambda name: None)
     captured = {}
@@ -50,6 +64,7 @@ def test_qwen_adapter_builds_headless_json_command(monkeypatch, tmp_path: Path):
     assert cmd[cmd.index("--model") + 1] == "qwen-local"
     assert cmd[cmd.index("--auth-type") + 1] == "openai"
     assert "--append-system-prompt" in cmd
+    assert "--safe-mode" in cmd
     assert cmd[cmd.index("-e") + 1] == "none"
     assert "--chat-recording=false" in cmd
     assert captured["cwd"] == tmp_path
@@ -74,7 +89,10 @@ def test_qwen_adapter_uses_plan_for_read_only_roles(monkeypatch, tmp_path: Path)
         "glob",
         "list_directory",
     ]
-    assert "--exclude-tools" not in cmd
+    denied = _array_option(cmd, "--exclude-tools")
+    _assert_common_qwen_denies(denied)
+    assert "Bash(git *)" not in denied
+    assert "Bash(gh *)" not in denied
 
 
 def test_qwen_adapter_uses_yolo_for_implementation_roles(monkeypatch, tmp_path: Path):
@@ -99,10 +117,13 @@ def test_qwen_adapter_uses_yolo_for_implementation_roles(monkeypatch, tmp_path: 
         "write_file",
         "run_shell_command",
     ]
-    assert _array_option(cmd, "--exclude-tools") == ["Bash(git *)", "Bash(gh *)"]
+    denied = _array_option(cmd, "--exclude-tools")
+    _assert_common_qwen_denies(denied)
+    assert "Bash(git *)" in denied
+    assert "Bash(gh *)" in denied
 
 
-def test_qwen_adapter_planner_prompt_is_repository_grounded(monkeypatch, tmp_path: Path):
+def test_qwen_adapter_planner_prompt_is_repository_grounded_and_terse(monkeypatch, tmp_path: Path):
     monkeypatch.setattr("aipipe.agents.qwen.require_binary", lambda name: None)
     captured = {}
 
@@ -120,6 +141,11 @@ def test_qwen_adapter_planner_prompt_is_repository_grounded(monkeypatch, tmp_pat
     assert "concrete implementation code" in system_prompt
     assert "merely restate the task requirements" in system_prompt
     assert "closest existing tests" in system_prompt
+    assert "Do not narrate repository exploration" in system_prompt
+    assert "do not search the repository for the issue number" in system_prompt
+    assert "Do not read README files unless" in system_prompt
+    assert "immediately produce the required plan" in system_prompt
+    assert "Never call agent, list_agents" in system_prompt
 
 
 def test_qwen_adapter_uses_ephemeral_qwen_state(monkeypatch, tmp_path: Path):
