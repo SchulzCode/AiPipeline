@@ -842,11 +842,31 @@ class Orchestrator:
         blocking the task.
         """
         task_map = parse_task_map(plan_text) if plan_text else None
+        # Extract bounded guidance from task map for use in remediation
+        # This ensures that remediation only uses bounded, deterministic guidance
+        # that is derived from the parsed TaskMap, not raw Planner transcripts
+        bounded_guidance = self._derive_bounded_guidance_from_task_map(task_map) if task_map else None
         return (
-            self.context.build(worktree, contract, "IMPLEMENTER", plan=plan_text, task_map=task_map)
+            self.context.build(worktree, contract, "IMPLEMENTER", plan=plan_text, task_map=task_map, bounded_guidance=bounded_guidance)
             + "\n\n"
             + IMPLEMENTER_SUFFIX
         )
+
+    def _derive_bounded_guidance_from_task_map(self, task_map: TaskMap | None) -> dict[str, list[str]]:
+        """Derive bounded, deterministic Planner guidance from a parsed TaskMap.
+        
+        This guidance is used in remediation to ensure that no raw Planner
+        transcripts or session IDs become part of remediation state.
+        """
+        # Extract only the relevant fields that provide actionable guidance
+        guidance = {}
+        if task_map and task_map.constraints:
+            guidance["constraints"] = list(task_map.constraints)
+        if task_map and task_map.risks:
+            guidance["risks"] = list(task_map.risks)
+        if task_map and task_map.out_of_scope:
+            guidance["out_of_scope"] = list(task_map.out_of_scope)
+        return guidance
 
     def _run_discovery_agent(
         self,
